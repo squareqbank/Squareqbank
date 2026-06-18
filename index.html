@@ -432,7 +432,9 @@ const DB = {
 render(); // show login immediately — don't wait for async session check
 
 sb.auth.onAuthStateChange(async (event, session) => {
-  if(event === 'SIGNED_IN' && session && S.screen === 'login'){
+  // Only handle session restore on page refresh — not during active login
+  // (login flow is handled directly in Q.onLogin to avoid double-calling DB.afterLogin)
+  if(event === 'SIGNED_IN' && session && S.screen === 'login' && !S.loginLoading){
     await DB.afterLogin(session.user);
   }
 });
