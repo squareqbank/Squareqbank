@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Square QBank",
+      "runtimeExecutable": "C:\\Program Files\\Adobe\\Adobe Creative Cloud Experience\\libs\\node.exe",
+      "runtimeArgs": ["-e", "require('http').createServer((req,res)=>{const fs=require('fs'),path=require('path'),fp=require('path').join('C:\\\\Users\\\\Samsung\\\\Documents\\\\Square qbank',req.url==='/'?'index.html':req.url);fs.readFile(fp,(e,d)=>{if(e){res.writeHead(404);res.end();}else{const ext=fp.split('.').pop();const m={'html':'text/html','js':'text/javascript','css':'text/css'};res.writeHead(200,{'Content-Type':m[ext]||'text/plain'});res.end(d);}});}).listen(3000,()=>console.log('ok'))"],
+      "port": 3000
+    }
+  ]
+}
