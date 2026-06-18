@@ -93,6 +93,8 @@ const S = {
   mode:'study', queue:[0,1,2,3,4,5,6,7], qPos:0,
   answers:{}, flags:{}, examLeft:1500,
   adminTab:'users', importing:false, importPct:0, importDone:false,
+  showCreateModal:false, createError:'', createLoading:false,
+  showBulkModal:false, bulkText:'', bulkResults:[], bulkLoading:false,
 };
 
 let _timerInterval = null;
@@ -256,6 +258,35 @@ window.Q={
   setQPos(i){setState({qPos:i});},
   onFlag(){const q=curQ();const f={...S.flags};f[q.id]=!f[q.id];setState({flags:f});DB.toggleFlag(q.id);},
   setAdminTab(k){setState({adminTab:k});},
+  openCreateModal(){setState({showCreateModal:true,createError:'',createLoading:false});},
+  closeCreateModal(){setState({showCreateModal:false,createError:'',createLoading:false});},
+  async onCreateStudent(){
+    const u=document.getElementById('cu-username')?.value.trim();
+    const n=document.getElementById('cu-fullname')?.value.trim();
+    const p=document.getElementById('cu-password')?.value;
+    const s=parseInt(document.getElementById('cu-stage')?.value||'5');
+    if(!u||!n||!p){setState({createError:'All fields required.'});return;}
+    setState({createLoading:true,createError:''});
+    const res=await DB.createStudent(u,n,p,s);
+    if(res.error){setState({createLoading:false,createError:res.error});return;}
+    setState({showCreateModal:false,createLoading:false,createError:''});
+  },
+  openBulkModal(){setState({showBulkModal:true,bulkText:'',bulkResults:[],bulkLoading:false});},
+  closeBulkModal(){setState({showBulkModal:false,bulkText:'',bulkResults:[],bulkLoading:false});},
+  async resetDevice(userId){await DB.resetDevice(userId);},
+  async onBulkCreate(){
+    const raw=document.getElementById('bulk-csv')?.value.trim();
+    if(!raw){return;}
+    // parse lines: username,full name,password,stage(optional)
+    const rows=raw.split('\n').map(l=>l.trim()).filter(l=>l&&!l.startsWith('#'));
+    const students=rows.map(l=>{const[username,full_name,password,stage]=l.split(',').map(x=>x?.trim());return{username,full_name,password,stage:parseInt(stage)||5};}).filter(r=>r.username&&r.full_name&&r.password);
+    if(!students.length){return;}
+    setState({bulkLoading:true,bulkResults:[]});
+    const {data,error}=await sb.rpc('admin_create_students',{p_students:students});
+    if(error){setState({bulkLoading:false,bulkResults:[{username:'Error',status:'error',error:error.message}]});return;}
+    await DB.loadUsers();
+    setState({bulkLoading:false,bulkResults:data||[]});
+  },
   onImport(){
     if(S.importing||S.importDone)return;
     setState({importing:true,importPct:0,importDone:false});
@@ -372,13 +403,13 @@ const DB = {
     setState({dbUsers: data||[]});
   },
 
-  async createStudent(username, fullName, password){
+  async createStudent(username, fullName, password, stage=5){
     const {data, error} = await sb.rpc('admin_create_student',{
-      p_username: username, p_full_name: fullName, p_password: password,
+      p_username: username, p_full_name: fullName, p_password: password, p_stage: stage,
     });
     if(error) return {error: error.message};
     await DB.loadUsers();
-    return {id: data};
+    return {id: data?.id, status: data?.status};
   },
 
   async resetDevice(userId){
@@ -862,27 +893,85 @@ function renderApp(){
       {key:'option_a … option_e',desc:'Five choices'},{key:'answer',desc:'Correct letter A–E'},{key:'explanation',desc:'Optional rationale'},
     ];
 
+    // modals (rendered outside main flow, overlaid)
+    const modalOverlay=`position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;display:flex;align-items:center;justify-content:center;padding:16px`;
+    const modalBox=`background:var(--surface);border-radius:20px;box-shadow:var(--shadow-lg);width:100%;max-width:460px;padding:28px;position:relative`;
+
+    const createModalHTML=S.showCreateModal?`<div style="${modalOverlay}" onclick="if(event.target===this)Q.closeCreateModal()">
+      <div style="${modalBox}">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+          <div style="font-weight:800;font-size:18px;color:var(--text)">Create student account</div>
+          <span class="ms" onclick="Q.closeCreateModal()" style="font-size:22px;color:var(--faint);cursor:pointer">close</span>
+        </div>
+        ${S.createError?`<div style="background:var(--red-soft);color:var(--red);border-radius:10px;padding:10px 14px;font-weight:600;font-size:13px;margin-bottom:14px">${esc(S.createError)}</div>`:''}
+        <div style="display:flex;flex-direction:column;gap:12px">
+          <div><label style="font-weight:600;font-size:12.5px;color:var(--muted);display:block;margin-bottom:5px">Username</label>
+            <input id="cu-username" placeholder="e.g. ahmed.r" style="width:100%;height:42px;border:1.5px solid var(--border);border-radius:10px;padding:0 12px;font-size:14px;background:var(--surface2);color:var(--text);outline:none;font-family:JetBrains Mono,monospace"></div>
+          <div><label style="font-weight:600;font-size:12.5px;color:var(--muted);display:block;margin-bottom:5px">Full name</label>
+            <input id="cu-fullname" placeholder="Ahmed Al-Rashid" style="width:100%;height:42px;border:1.5px solid var(--border);border-radius:10px;padding:0 12px;font-size:14px;background:var(--surface2);color:var(--text);outline:none"></div>
+          <div><label style="font-weight:600;font-size:12.5px;color:var(--muted);display:block;margin-bottom:5px">Password</label>
+            <input id="cu-password" type="password" placeholder="Temporary password" style="width:100%;height:42px;border:1.5px solid var(--border);border-radius:10px;padding:0 12px;font-size:14px;background:var(--surface2);color:var(--text);outline:none"></div>
+          <div><label style="font-weight:600;font-size:12.5px;color:var(--muted);display:block;margin-bottom:5px">Stage (year)</label>
+            <select id="cu-stage" style="width:100%;height:42px;border:1.5px solid var(--border);border-radius:10px;padding:0 12px;font-size:14px;background:var(--surface2);color:var(--text);outline:none">
+              ${[1,2,3,4,5,6].map(y=>`<option value="${y}"${y===5?' selected':''}>Year ${y}</option>`).join('')}
+            </select></div>
+        </div>
+        <button onclick="Q.onCreateStudent()" style="width:100%;height:48px;margin-top:20px;border:none;border-radius:12px;background:var(--blue);color:#fff;font-weight:700;font-size:15px;cursor:pointer;opacity:${S.createLoading?.6:1}">
+          ${S.createLoading?'Creating…':'Create account'}
+        </button>
+      </div>
+    </div>`:'';
+
+    const bulkModalHTML=S.showBulkModal?`<div style="${modalOverlay}" onclick="if(event.target===this)Q.closeBulkModal()">
+      <div style="${modalBox};max-width:540px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+          <div style="font-weight:800;font-size:18px;color:var(--text)">Bulk create students</div>
+          <span class="ms" onclick="Q.closeBulkModal()" style="font-size:22px;color:var(--faint);cursor:pointer">close</span>
+        </div>
+        <div style="font-weight:500;font-size:13px;color:var(--muted);margin-bottom:14px">One student per line: <span style="font-family:JetBrains Mono;color:var(--text)">username, Full Name, password, stage</span></div>
+        <textarea id="bulk-csv" rows="8" placeholder="ahmed.r, Ahmed Al-Rashid, pass123, 5&#10;sara.k, Sara Khalid, pass456, 4&#10;mustafa.m, Mustafa Mahmoud, pass789, 6" style="width:100%;border:1.5px solid var(--border);border-radius:12px;padding:12px;font-size:13px;font-family:JetBrains Mono,monospace;background:var(--surface2);color:var(--text);outline:none;resize:vertical;line-height:1.7">${esc(S.bulkText)}</textarea>
+        ${S.bulkResults.length?`<div style="margin-top:12px;max-height:160px;overflow-y:auto;border:1px solid var(--border);border-radius:10px">
+          ${S.bulkResults.map(r=>{const ok=r.status!=='error';return`<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border2)"><span class="ms" style="font-size:17px;color:${ok?'var(--green)':'var(--red)'}">${ok?'check_circle':'error'}</span><span style="font-weight:600;font-size:13px;font-family:JetBrains Mono;color:var(--text)">${esc(r.username)}</span><span style="font-weight:500;font-size:12px;color:var(--muted);margin-left:auto">${ok?r.status:esc(r.error||'')}</span></div>`;}).join('')}
+        </div>`:''}
+        <button onclick="Q.onBulkCreate()" style="width:100%;height:48px;margin-top:16px;border:none;border-radius:12px;background:var(--blue);color:#fff;font-weight:700;font-size:15px;cursor:pointer;opacity:${S.bulkLoading?.6:1}">
+          ${S.bulkLoading?'Creating…':'Create all'}
+        </button>
+      </div>
+    </div>`:'';
+
     let tabContent='';
     if(S.adminTab==='users'){
-      tabContent=`<div style="background:var(--surface);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow);overflow:hidden">
+      const usersToShow=S.dbUsers.length?S.dbUsers:[];
+      tabContent=`${createModalHTML}${bulkModalHTML}<div style="background:var(--surface);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow);overflow:hidden">
         <div style="display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid var(--border)">
           <span style="font-weight:700;font-size:15px;color:var(--text)">Students</span>
+          <span style="font-weight:500;font-size:12.5px;color:var(--muted)">${usersToShow.length} total</span>
           <div style="flex:1"></div>
-          <button style="display:flex;align-items:center;gap:7px;height:40px;padding:0 16px;border:none;border-radius:10px;background:var(--blue);color:#fff;font-weight:700;font-size:13.5px;cursor:pointer"><span class="ms" style="font-size:19px">person_add</span>Create user</button>
+          <button onclick="Q.openBulkModal()" style="display:flex;align-items:center;gap:7px;height:40px;padding:0 14px;border:1.5px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text);font-weight:700;font-size:13px;cursor:pointer;margin-right:8px"><span class="ms" style="font-size:18px">group_add</span>Bulk create</button>
+          <button onclick="Q.openCreateModal()" style="display:flex;align-items:center;gap:7px;height:40px;padding:0 16px;border:none;border-radius:10px;background:var(--blue);color:#fff;font-weight:700;font-size:13.5px;cursor:pointer"><span class="ms" style="font-size:19px">person_add</span>Create user</button>
         </div>
         <div style="overflow-x:auto"><div style="min-width:680px">
-          <div style="display:grid;grid-template-columns:2fr 1.2fr 1fr 1.1fr 1.1fr 50px;padding:11px 20px;border-bottom:1px solid var(--border);background:var(--surface2);font-weight:700;font-size:11.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">
-            <div>Student</div><div>Username</div><div>Status</div><div>Device</div><div>Last active</div><div></div>
+          <div style="display:grid;grid-template-columns:2fr 1.2fr 1fr 1.1fr 100px;padding:11px 20px;border-bottom:1px solid var(--border);background:var(--surface2);font-weight:700;font-size:11.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">
+            <div>Student</div><div>Username</div><div>Stage</div><div>Device</div><div></div>
           </div>
-          ${usersRaw.map(u=>{const t=tile(u.hue);const statusColor=u.status==='Active'?'var(--green)':'var(--muted)';const statusBg=u.status==='Active'?'var(--green-soft)':'var(--surface3)';const deviceIcon=u.device==='Locked'?'lock':'verified_user';const deviceColor=u.device==='Locked'?'var(--yellow-ink)':'var(--green)';
-            return `<div style="display:grid;grid-template-columns:2fr 1.2fr 1fr 1.1fr 1.1fr 50px;align-items:center;padding:13px 20px;border-bottom:1px solid var(--border2)">
-              <div style="display:flex;align-items:center;gap:11px"><div style="width:34px;height:34px;border-radius:9px;background:${t.bg};color:${t.fg};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;flex:none">${u.name[0]}</div><span style="font-weight:600;font-size:14px;color:var(--text)">${esc(u.name)}</span></div>
-              <div style="font-weight:500;font-size:13px;font-family:'JetBrains Mono';color:var(--muted)">${esc(u.username)}</div>
-              <div><span style="font-weight:600;font-size:12px;color:${statusColor};background:${statusBg};padding:4px 10px;border-radius:20px">${u.status}</span></div>
-              <div style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:12.5px;color:var(--muted)"><span class="ms" style="font-size:16px;color:${deviceColor}">${deviceIcon}</span>${u.device}</div>
-              <div style="font-weight:500;font-size:12.5px;color:var(--muted)">${esc(u.lastSeen)}</div>
-              <div style="text-align:right"><span class="ms" style="font-size:20px;color:var(--faint);cursor:pointer">more_horiz</span></div>
-            </div>`;}).join('')}
+          ${usersToShow.length===0
+            ?`<div style="padding:48px;text-align:center;color:var(--muted);font-weight:500;font-size:14px"><span class="ms" style="font-size:36px;display:block;margin-bottom:8px">group</span>No students yet — click "Create user" to add one.</div>`
+            :usersToShow.map(u=>{
+              const name=u.full_name||u.username;
+              const hue=180;
+              const t=tile(hue);
+              const deviceIcon=u.device_fp?'verified_user':'device_unknown';
+              const deviceColor=u.device_fp?'var(--green)':'var(--faint)';
+              const deviceLabel=u.device_fp?'Registered':'None';
+              return `<div style="display:grid;grid-template-columns:2fr 1.2fr 1fr 1.1fr 100px;align-items:center;padding:13px 20px;border-bottom:1px solid var(--border2)">
+                <div style="display:flex;align-items:center;gap:11px"><div style="width:34px;height:34px;border-radius:9px;background:${t.bg};color:${t.fg};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:13px;flex:none">${(name[0]||'?').toUpperCase()}</div><span style="font-weight:600;font-size:14px;color:var(--text)">${esc(name)}</span></div>
+                <div style="font-weight:500;font-size:13px;font-family:'JetBrains Mono';color:var(--muted)">${esc(u.username)}</div>
+                <div style="font-weight:500;font-size:13px;color:var(--muted)">Year ${u.stage||5}</div>
+                <div style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:12.5px;color:var(--muted)"><span class="ms" style="font-size:16px;color:${deviceColor}">${deviceIcon}</span>${deviceLabel}</div>
+                <div style="display:flex;gap:8px;justify-content:flex-end">
+                  ${u.device_fp?`<button onclick="Q.resetDevice('${u.id}')" title="Reset device lock" style="height:30px;padding:0 10px;border:1px solid var(--border);border-radius:7px;background:transparent;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:4px"><span class="ms" style="font-size:14px">lock_reset</span>Reset</button>`:''}
+                </div>
+              </div>`;}).join('')}
         </div></div>
       </div>`;
     } else if(S.adminTab==='questions'){
