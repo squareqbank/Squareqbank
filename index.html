@@ -311,16 +311,19 @@ const DB = {
     if(profErr || !prof){ setState({authError:'Profile not found. Contact administrator.', loginLoading:false}); await sb.auth.signOut(); return; }
     if(!prof.is_active){ setState({authError:'Account is deactivated. Contact administrator.', loginLoading:false}); await sb.auth.signOut(); return; }
 
-    // device lock check (non-fatal — if it errors, continue)
-    try {
-      const fp = getDeviceFP();
-      const {data:devRes} = await sb.rpc('lock_device', {p_fp: fp});
-      if(devRes?.status === 'locked'){
-        await sb.auth.signOut();
-        setState({authError:'This account is locked to another device. Contact your administrator to reset.', loginLoading:false});
-        return;
-      }
-    } catch(_){}
+    // device lock check (non-fatal — if it errors, continue).
+    // Admins are exempt: they manage from multiple devices.
+    if(prof.role !== 'admin'){
+      try {
+        const fp = getDeviceFP();
+        const {data:devRes} = await sb.rpc('lock_device', {p_fp: fp});
+        if(devRes?.status === 'locked'){
+          await sb.auth.signOut();
+          setState({authError:'This account is locked to another device. Contact your administrator to reset.', loginLoading:false});
+          return;
+        }
+      } catch(_){}
+    }
 
     // load data in parallel — failures are non-fatal
     await Promise.allSettled([
@@ -431,18 +434,28 @@ const DB = {
 /* ── boot: restore session ── */
 render(); // show login immediately — don't wait for async session check
 
-sb.auth.onAuthStateChange(async (event, session) => {
+let _restoring = false;
+
+sb.auth.onAuthStateChange((event, session) => {
   // Only handle session restore on page refresh — not during active login
-  // (login flow is handled directly in Q.onLogin to avoid double-calling DB.afterLogin)
-  if(event === 'SIGNED_IN' && session && S.screen === 'login' && !S.loginLoading){
-    await DB.afterLogin(session.user);
+  // (login flow is handled directly in Q.onLogin to avoid double-calling DB.afterLogin).
+  // IMPORTANT: supabase-js holds a Web Lock for the duration of this callback, so
+  // awaiting any other supabase call here (as DB.afterLogin does) deadlocks the client
+  // and hangs every subsequent auth/DB request — the "spinner forever" bug. Defer the
+  // work with setTimeout so it runs after the callback returns and the lock is released.
+  if(event === 'SIGNED_IN' && session && S.screen === 'login' && !S.loginLoading && !_restoring){
+    _restoring = true;
+    setTimeout(async () => {
+      try { await DB.afterLogin(session.user); } finally { _restoring = false; }
+    }, 0);
   }
 });
 
 (async()=>{
   const {data:{session}} = await sb.auth.getSession();
-  if(session && S.screen === 'login'){
-    await DB.afterLogin(session.user);
+  if(session && S.screen === 'login' && !S.loginLoading && !_restoring){
+    _restoring = true;
+    try { await DB.afterLogin(session.user); } finally { _restoring = false; }
   }
 })();
 
