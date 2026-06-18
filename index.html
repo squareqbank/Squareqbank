@@ -35,6 +35,7 @@ html,body{margin:0;padding:0}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:10px;border:2px solid transparent;background-clip:content-box}
 @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 @keyframes pop{from{opacity:0;transform:scale(.98)}to{opacity:1;transform:none}}
+@keyframes spin{to{transform:rotate(360deg)}}
 .mobile-only{display:none!important}
 @media(max-width:1120px){.grid-4{grid-template-columns:repeat(2,1fr)!important}}
 @media(max-width:900px){
@@ -87,7 +88,7 @@ const S = {
   dbUsers:[],            // admin: students list
   activeSessionId:null,  // current session UUID
   deviceStatus:'ok',     // 'ok' | 'registered' | 'locked'
-  authError:'',
+  authError:'', loginLoading:false,
   subjectId:'medicine', lectureId:'cardio', lectureName:'Cardiology',
   sessionSubject:'Medicine', sessionLecture:'Cardiology',
   mode:'study', queue:[0,1,2,3,4,5,6,7], qPos:0,
@@ -189,14 +190,15 @@ window.Q={
   async onLogin(){
     const usernameEl = document.getElementById('login-username');
     const passwordEl = document.getElementById('login-password');
-    const username   = usernameEl ? usernameEl.value.trim() : 'ahmed.r';
-    const password   = passwordEl ? passwordEl.value : '123456789';
+    const username   = usernameEl ? usernameEl.value.trim() : '';
+    const password   = passwordEl ? passwordEl.value : '';
     if(!username || !password){ setState({authError:'Enter username and password.'}); return; }
-    setState({authError:''});
+    setState({authError:'', loginLoading:true});
     const email = username + '@squareqbank.local';
     const {data, error} = await sb.auth.signInWithPassword({email, password});
-    if(error){ setState({authError:'Invalid username or password.'}); return; }
+    if(error){ setState({authError:'Invalid username or password.', loginLoading:false}); return; }
     await DB.afterLogin(data.user);
+    setState({loginLoading:false});
   },
   onGuest(){setState({screen:'dashboard',role:'guest',profile:null,answers:{},flags:{},qPos:0,authError:''});},
   async onLogout(){
@@ -509,7 +511,11 @@ function renderLogin(){
           <span class="ms" style="font-size:18px;color:var(--blue)">verified_user</span>
           <span style="font-weight:500;font-size:12.5px;color:var(--blue-ink)">This device is registered. One account · one device.</span>
         </div>
-        <button onclick="Q.onLogin()" style="width:100%;height:50px;border:none;border-radius:12px;background:var(--blue);color:#fff;font-weight:700;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 6px 18px rgba(39,103,224,.3)">Sign in<span class="ms" style="font-size:20px">arrow_forward</span></button>
+        <button onclick="Q.onLogin()" ${S.loginLoading?'disabled':''} style="width:100%;height:50px;border:none;border-radius:12px;background:var(--blue);color:#fff;font-weight:700;font-size:16px;cursor:${S.loginLoading?'not-allowed':'pointer'};display:flex;align-items:center;justify-content:center;gap:8px;box-shadow:0 6px 18px rgba(39,103,224,.3);opacity:${S.loginLoading?.7:1};transition:opacity .2s">
+          ${S.loginLoading
+            ? `<span style="width:18px;height:18px;border:2.5px solid rgba(255,255,255,.35);border-top-color:#fff;border-radius:50%;display:inline-block;animation:spin .7s linear infinite"></span>Signing in…`
+            : `Sign in<span class="ms" style="font-size:20px">arrow_forward</span>`}
+        </button>
         <div style="display:flex;align-items:center;gap:12px;margin:18px 0 0">
           <div style="flex:1;height:1px;background:var(--border)"></div>
           <span style="font-weight:500;font-size:12px;color:var(--faint)">or</span>
