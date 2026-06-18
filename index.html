@@ -419,6 +419,8 @@ const DB = {
 };
 
 /* ── boot: restore session ── */
+render(); // show login immediately — don't wait for async session check
+
 sb.auth.onAuthStateChange(async (event, session) => {
   if(event === 'SIGNED_IN' && session && S.screen === 'login'){
     await DB.afterLogin(session.user);
@@ -427,10 +429,8 @@ sb.auth.onAuthStateChange(async (event, session) => {
 
 (async()=>{
   const {data:{session}} = await sb.auth.getSession();
-  if(session){
+  if(session && S.screen === 'login'){
     await DB.afterLogin(session.user);
-  } else {
-    render(); // show login
   }
 })();
 
