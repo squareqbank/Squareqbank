@@ -194,11 +194,14 @@ window.Q={
     const password   = passwordEl ? passwordEl.value : '';
     if(!username || !password){ setState({authError:'Enter username and password.'}); return; }
     setState({authError:'', loginLoading:true});
-    const email = username + '@squareqbank.local';
-    const {data, error} = await sb.auth.signInWithPassword({email, password});
-    if(error){ setState({authError:'Invalid username or password.', loginLoading:false}); return; }
-    await DB.afterLogin(data.user);
-    setState({loginLoading:false});
+    try {
+      const email = username + '@squareqbank.local';
+      const {data, error} = await sb.auth.signInWithPassword({email, password});
+      if(error){ setState({authError:'Invalid username or password.', loginLoading:false}); return; }
+      await DB.afterLogin(data.user);
+    } catch(e) {
+      setState({authError:'Connection error. Please try again.', loginLoading:false});
+    }
   },
   onGuest(){setState({screen:'dashboard',role:'guest',profile:null,answers:{},flags:{},qPos:0,authError:''});},
   async onLogout(){
@@ -304,29 +307,34 @@ window.Q={
 const DB = {
 
   async afterLogin(user){
-    // load profile
-    const {data:prof} = await sb.from('profiles').select('*').eq('id', user.id).single();
-    if(!prof){ setState({authError:'Profile not found. Contact administrator.'}); await sb.auth.signOut(); return; }
-    if(!prof.is_active){ setState({authError:'Account is deactivated. Contact administrator.'}); await sb.auth.signOut(); return; }
+    const {data:prof, error:profErr} = await sb.from('profiles').select('*').eq('id', user.id).single();
+    if(profErr || !prof){ setState({authError:'Profile not found. Contact administrator.', loginLoading:false}); await sb.auth.signOut(); return; }
+    if(!prof.is_active){ setState({authError:'Account is deactivated. Contact administrator.', loginLoading:false}); await sb.auth.signOut(); return; }
 
-    // device lock check
-    const fp = getDeviceFP();
-    const {data:devRes} = await sb.rpc('lock_device', {p_fp: fp});
-    if(devRes?.status === 'locked'){
-      await sb.auth.signOut();
-      setState({authError:'This account is locked to another device. Contact your administrator to reset.'}); return;
-    }
+    // device lock check (non-fatal — if it errors, continue)
+    try {
+      const fp = getDeviceFP();
+      const {data:devRes} = await sb.rpc('lock_device', {p_fp: fp});
+      if(devRes?.status === 'locked'){
+        await sb.auth.signOut();
+        setState({authError:'This account is locked to another device. Contact your administrator to reset.', loginLoading:false});
+        return;
+      }
+    } catch(_){}
 
-    // load data
-    await DB.loadSubjectsAndLectures();
-    await DB.loadQuestions();
-    if(prof.role === 'admin') await DB.loadUsers();
-    await DB.loadFlags(user.id);
+    // load data in parallel — failures are non-fatal
+    await Promise.allSettled([
+      DB.loadSubjectsAndLectures(),
+      DB.loadQuestions(),
+      prof.role === 'admin' ? DB.loadUsers() : Promise.resolve(),
+      DB.loadFlags(user.id),
+    ]);
 
     setState({
       profile: prof,
       role: prof.role === 'admin' ? 'admin' : 'user',
       screen: 'dashboard',
+      loginLoading: false,
       answers:{}, flags: S.flags, qPos:0, authError:'',
     });
   },
