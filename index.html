@@ -89,17 +89,21 @@ const S = {
   activeSessionId:null,  // current session UUID
   deviceStatus:'ok',     // 'ok' | 'registered' | 'locked'
   authError:'', loginLoading:false,
-  subjectId:'medicine', lectureId:'cardio', lectureName:'Cardiology',
-  sessionSubject:'Medicine', sessionLecture:'Cardiology',
-  mode:'study', queue:[0,1,2,3,4,5,6,7], qPos:0,
+  subjectId:'', lectureId:'', lectureName:'',
+  sessionSubject:'', sessionLecture:'',
+  mode:'study', queue:[], qPos:0,
   answers:{}, flags:{}, examLeft:1500,
-  adminTab:'users', importing:false, importPct:0, importDone:false,
+  dbSessions:[],                 // current user's sessions (real stats/analytics)
+  dbQuestionCount:0,             // admin: total questions in the bank
+  testScope:null,                // {type:'lecture'|'subject', lectureIds:[], label, subjectName}
+  selectedLectures:{},           // lectureId -> true (subject-test lecture picker)
+  practiceError:'',              // shown when a lecture/subject has no questions yet
+  adminTab:'users',
   showCreateModal:false, createError:'', createLoading:false,
   showBulkModal:false, bulkText:'', bulkResults:[], bulkLoading:false,
 };
 
 let _timerInterval = null;
-let _importInterval = null;
 
 /* ── data ── */
 function subjectsData(){
@@ -137,30 +141,17 @@ function lecturesFor(id){
   return [];
 }
 
-const FALLBACK_QUESTIONS = [
-  {id:'c1',tag:'Cardiology',stem:'A 58-year-old man presents with crushing central chest pain radiating to the left arm for 2 hours. ECG shows ST-elevation in leads II, III and aVF. Which coronary artery is most likely occluded?',options:['Left anterior descending','Left circumflex','Right coronary artery','Left main stem','Diagonal branch'],answer:2,explanation:'ST-elevation in the inferior leads (II, III, aVF) indicates an inferior STEMI, most commonly caused by occlusion of the right coronary artery in a right-dominant circulation.'},
-  {id:'c2',tag:'Cardiology',stem:'Which of the following is the single most appropriate immediate drug to give a patient with an acute ST-elevation myocardial infarction?',options:['Aspirin 300 mg','Warfarin','Furosemide','Digoxin','Amiodarone'],answer:0,explanation:'Immediate chewed aspirin 300 mg is given as soon as ACS is suspected; it reduces mortality through its antiplatelet effect and is the priority first drug.'},
-  {id:'c3',tag:'Cardiology',stem:'A 72-year-old woman with atrial fibrillation has a CHA₂DS₂-VASc score of 3. What is the recommended long-term management to reduce stroke risk?',options:['No antithrombotic therapy','Aspirin alone','Oral anticoagulation','Clopidogrel alone','LMWH for one week only'],answer:2,explanation:'A CHA₂DS₂-VASc score of ≥2 warrants long-term oral anticoagulation (e.g. a DOAC or warfarin). Antiplatelet therapy is no longer recommended for stroke prevention in AF.'},
-  {id:'c4',tag:'Cardiology',stem:'A pansystolic murmur best heard at the apex and radiating to the axilla is most characteristic of which valvular lesion?',options:['Aortic stenosis','Mitral regurgitation','Mitral stenosis','Aortic regurgitation','Pulmonary stenosis'],answer:1,explanation:'Mitral regurgitation produces a pansystolic murmur loudest at the apex that classically radiates to the axilla.'},
-  {id:'c5',tag:'Cardiology',stem:'What is the most common cause of mitral stenosis worldwide?',options:['Congenital valve disease','Infective endocarditis','Rheumatic heart disease','Degenerative calcification','Carcinoid syndrome'],answer:2,explanation:'Rheumatic heart disease, a sequela of streptococcal rheumatic fever, remains by far the most common cause of mitral stenosis globally.'},
-  {id:'c6',tag:'Cardiology',stem:'A 70-year-old man reports exertional syncope, angina and breathlessness. Examination reveals an ejection systolic murmur radiating to the carotids with a slow-rising pulse. The most likely diagnosis is:',options:['Mitral regurgitation','Aortic stenosis','Tricuspid regurgitation','Ventricular septal defect','Mitral valve prolapse'],answer:1,explanation:'The triad of syncope, angina and dyspnoea with an ejection systolic murmur radiating to the carotids and a slow-rising pulse is classic for severe aortic stenosis.'},
-  {id:'c7',tag:'Cardiology',stem:'Which class of drug is first-line for symptom control in chronic stable angina?',options:['Beta-blocker','Warfarin','Digoxin','Furosemide','Spironolactone'],answer:0,explanation:'Beta-blockers (or rate-limiting calcium-channel blockers if beta-blockers are contraindicated) are first-line anti-anginal therapy for symptom control.'},
-  {id:'c8',tag:'Cardiology',stem:'Which ECG finding is the earliest and most characteristic feature of hyperkalaemia?',options:['U waves','Tall, tented T waves','ST depression','Prolonged QT interval','Delta wave'],answer:1,explanation:'Tall, peaked (tented) T waves are the earliest characteristic ECG change of hyperkalaemia, later followed by widened QRS and loss of P waves.'},
-];
-
 function questions(){
-  // DB questions take priority; map DB row shape → app shape
-  if(S.dbQuestions.length){
-    return S.dbQuestions.map(q=>({
-      id: q.id,
-      tag: q.tag || q.lecture_id,
-      stem: q.stem,
-      options:[q.option_a,q.option_b,q.option_c,q.option_d,q.option_e],
-      answer: q.answer,
-      explanation: q.explanation||'',
-    }));
-  }
-  return FALLBACK_QUESTIONS;
+  // Real questions from Supabase, mapped to the app's shape.
+  // Empty until MCQs are added to the bank — the UI shows honest empty states.
+  return S.dbQuestions.map(q=>({
+    id: q.id,
+    tag: q.tag || q.lecture_id,
+    stem: q.stem,
+    options:[q.option_a,q.option_b,q.option_c,q.option_d,q.option_e],
+    answer: q.answer,
+    explanation: q.explanation||'',
+  }));
 }
 
 /* ── helpers ── */
@@ -171,7 +162,18 @@ function tile(hue){
     :{bg:'oklch(0.95 0.045 '+hue+')',fg:'oklch(0.52 0.14 '+hue+')'};
 }
 function curQ(){const qs=questions();return qs[S.queue[S.qPos]]||qs[0];}
-function seedAnswers(){const qs=questions();const a={};[0,1,2,3,4].forEach((i,k)=>{a[qs[i].id]=(k===2?(qs[i].answer+1)%5:qs[i].answer);});return a;}
+
+/* real per-user stats derived from loaded sessions */
+function userStats(){
+  const ss=S.dbSessions||[];
+  const answered=ss.reduce((n,s)=>n+(s.answered||0),0);
+  const correct=ss.reduce((n,s)=>n+(s.correct||0),0);
+  const completed=ss.filter(s=>s.status==='completed').length;
+  const weekAgo=Date.now()-7*864e5;
+  const weekAnswered=ss.filter(s=>new Date(s.started_at).getTime()>=weekAgo).reduce((n,s)=>n+(s.answered||0),0);
+  const flagged=Object.keys(S.flags||{}).filter(k=>S.flags[k]).length;
+  return {answered,correct,completed,weekAnswered,flagged,accuracy:answered?Math.round(correct/answered*100):null,sessions:ss.length};
+}
 
 /* ── actions ── */
 function setState(patch){
@@ -184,9 +186,29 @@ window.Q={
   go(k){setState({screen:k==='subjects'?'subjects':k==='analytics'?'analytics':k==='admin'?'admin':'dashboard'});},
   goDashboard(){setState({screen:'dashboard'});},
   goSubjects(){setState({screen:'subjects'});},
-  openSubject(id){setState({subjectId:id,screen:'lectures'});},
-  openLecture(id,name){setState({lectureId:id,lectureName:name,screen:'modeselect'});},
+  openSubject(id){setState({subjectId:id,screen:'lectures',selectedLectures:{},practiceError:''});},
+  openLecture(id,name){
+    const subj=subjectsData().find(s=>s.id===S.subjectId);
+    setState({lectureId:id,lectureName:name,practiceError:'',
+      testScope:{type:'lecture',lectureIds:[id],label:name,subjectName:subj?subj.name:''},
+      screen:'modeselect'});
+  },
   onBackToLectures(){setState({screen:'lectures'});},
+  toggleLecture(id){const sel={...S.selectedLectures};sel[id]?delete sel[id]:sel[id]=true;setState({selectedLectures:sel});},
+  selectAllLectures(){const sel={};lecturesFor(S.subjectId).forEach(l=>sel[l.id]=true);setState({selectedLectures:sel});},
+  clearLectureSelection(){setState({selectedLectures:{}});},
+  startSubjectTest(){
+    const subj=subjectsData().find(s=>s.id===S.subjectId);
+    const all=lecturesFor(S.subjectId);
+    const picked=Object.keys(S.selectedLectures).filter(k=>S.selectedLectures[k]);
+    const ids=picked.length?picked:all.map(l=>l.id);
+    if(!ids.length)return;
+    const label=picked.length&&picked.length<all.length
+      ? `${subj?subj.name:'Subject'} · ${ids.length} lectures`
+      : `All of ${subj?subj.name:'this subject'}`;
+    setState({testScope:{type:'subject',lectureIds:ids,label,subjectName:subj?subj.name:''},
+      lectureName:label,practiceError:'',screen:'modeselect'});
+  },
   async onLogin(){
     const usernameEl = document.getElementById('login-username');
     const passwordEl = document.getElementById('login-password');
@@ -206,51 +228,53 @@ window.Q={
   onGuest(){setState({screen:'dashboard',role:'guest',profile:null,answers:{},flags:{},qPos:0,authError:''});},
   async onLogout(){
     if(S.role!=='guest') await sb.auth.signOut();
-    setState({screen:'login',role:'user',profile:null,answers:{},flags:{},qPos:0,activeSessionId:null,authError:'',dbQuestions:[],dbUsers:[]});
+    setState({screen:'login',role:'user',profile:null,answers:{},flags:{},qPos:0,activeSessionId:null,authError:'',dbQuestions:[],dbUsers:[],dbSessions:[],testScope:null,selectedLectures:{},practiceError:''});
   },
   onToggleTheme(){setState({theme:S.theme==='light'?'dark':'light'});},
-  onResume(){
-    const qs=questions();
-    setState({subjectId:'medicine',lectureId:'cardio',lectureName:'Cardiology',
-      sessionSubject:'Medicine',sessionLecture:'Cardiology',
-      mode:'study',queue:qs.map((_,i)=>i),qPos:5,answers:seedAnswers(),flags:{[qs[1].id]:true},screen:'solver'});
-  },
-  onRandom(){
-    const qs=questions();
-    const idx=qs.map((_,i)=>i).sort(()=>Math.random()-0.5);
-    setState({mode:'exam',queue:idx,qPos:0,answers:{},flags:{},examLeft:2400,
-      sessionSubject:'All subjects',sessionLecture:'Random mixed exam',screen:'solver'});
-  },
   onReviewWrong(){
     const qs=questions();
-    let answers=S.answers;if(Object.keys(answers).length===0)answers=seedAnswers();
-    const wrong=qs.map((q,i)=>({q,i})).filter(x=>{const a=answers[x.q.id];return a!==undefined&&a!==x.q.answer;}).map(x=>x.i);
-    setState({answers,mode:'study',queue:wrong.length?wrong:qs.map((_,i)=>i),qPos:0,
+    const wrong=qs.map((q,i)=>({q,i})).filter(x=>{const a=S.answers[x.q.id];return a!==undefined&&a!==x.q.answer;}).map(x=>x.i);
+    if(!wrong.length)return;
+    setState({mode:'study',queue:wrong,qPos:0,activeSessionId:null,
       sessionSubject:'Review',sessionLecture:'Incorrect questions',screen:'solver'});
   },
   onReviewFlagged(){
     const qs=questions();
-    let flags=S.flags,answers=S.answers;
-    if(Object.keys(flags).filter(k=>flags[k]).length===0){flags={[qs[1].id]:true,[qs[4].id]:true,[qs[6].id]:true};if(Object.keys(answers).length===0)answers=seedAnswers();}
-    const fl=qs.map((q,i)=>({q,i})).filter(x=>flags[x.q.id]).map(x=>x.i);
-    setState({flags,answers,mode:'study',queue:fl.length?fl:qs.map((_,i)=>i),qPos:0,
+    const fl=qs.map((q,i)=>({q,i})).filter(x=>S.flags[x.q.id]).map(x=>x.i);
+    if(!fl.length)return;
+    setState({mode:'study',queue:fl,qPos:0,activeSessionId:null,
+      sessionSubject:'Review',sessionLecture:'Flagged questions',screen:'solver'});
+  },
+  async openFlagged(){
+    const ids=Object.keys(S.flags).filter(k=>S.flags[k]);
+    if(!ids.length){ setState({screen:'subjects'}); return; }   // nothing flagged → browse
+    const {data}=await sb.from('questions').select('*').eq('is_active',true).in('id',ids);
+    setState({dbQuestions:data||[]});
+    const qs=questions();
+    if(!qs.length){ setState({screen:'subjects'}); return; }
+    setState({mode:'study',queue:qs.map((_,i)=>i),qPos:0,activeSessionId:null,
       sessionSubject:'Review',sessionLecture:'Flagged questions',screen:'solver'});
   },
   async startSession(mode){
-    // load lecture questions from DB if authenticated
-    if(S.profile) await DB.loadQuestions(S.lectureId);
-    const qs=questions();
+    const scope=S.testScope||{type:'lecture',lectureIds:S.lectureId?[S.lectureId]:[],label:S.lectureName};
     const subj=subjectsData().find(s=>s.id===S.subjectId);
-    const subjName=subj?subj.name:'Medicine';
-    const sessionId=await DB.startSession(mode, S.lectureName, S.lectureId, S.subjectId, qs.length);
-    setState({mode,queue:qs.map((_,i)=>i),qPos:0,answers:{},examLeft:1500,
-      sessionSubject:subjName,sessionLecture:S.lectureName,
+    const subjName=subj?subj.name:'';
+    // load the real questions for this scope (one or many lectures)
+    if(S.profile) await DB.loadQuestionsForLectures(scope.lectureIds);
+    const qs=questions();
+    if(!qs.length){ setState({practiceError:'No questions in this selection yet — they’ll appear here once added to the bank.'}); return; }
+    const queue=qs.map((_,i)=>i);
+    if(mode==='exam') queue.sort(()=>Math.random()-0.5);
+    const lectureForSession = scope.type==='lecture' ? scope.lectureIds[0] : null;
+    const sessionId=await DB.startSession(mode, scope.label, lectureForSession, S.subjectId, qs.length);
+    setState({mode,queue,qPos:0,answers:{},examLeft:mode==='exam'?Math.max(600,qs.length*60):1500,
+      sessionSubject:subjName,sessionLecture:scope.label,
       activeSessionId:sessionId,screen:'solver'});
   },
   onStartStudy(){Q.startSession('study');},
   onStartExam(){Q.startSession('exam');},
   onRetry(){Q.startSession('study');},
-  onExitSolver(){setState({screen:S.subjectId?'lectures':'dashboard'});},
+  onExitSolver(){setState({screen:S.subjectId?'modeselect':'dashboard'});},
   onFinish(){DB.completeSession();setState({screen:'results'});},
   choose(i){
     const q=curQ();const a={...S.answers};
@@ -291,16 +315,6 @@ window.Q={
     await DB.loadUsers();
     setState({bulkLoading:false,bulkResults:data||[]});
   },
-  onImport(){
-    if(S.importing||S.importDone)return;
-    setState({importing:true,importPct:0,importDone:false});
-    clearInterval(_importInterval);
-    _importInterval=setInterval(()=>{
-      const p=Math.min(100,S.importPct+9);
-      if(p>=100){clearInterval(_importInterval);setState({importPct:100,importDone:true});}
-      else setState({importPct:p});
-    },170);
-  },
 };
 
 /* ── DB layer ── */
@@ -328,9 +342,10 @@ const DB = {
     // load data in parallel — failures are non-fatal
     await Promise.allSettled([
       DB.loadSubjectsAndLectures(),
-      DB.loadQuestions(),
-      prof.role === 'admin' ? DB.loadUsers() : Promise.resolve(),
+      DB.loadSessions(user.id),
       DB.loadFlags(user.id),
+      prof.role === 'admin' ? DB.loadUsers() : Promise.resolve(),
+      prof.role === 'admin' ? DB.loadQuestionCount() : Promise.resolve(),
     ]);
 
     setState({
@@ -355,6 +370,25 @@ const DB = {
     setState({dbQuestions: data||[]});
   },
 
+  async loadQuestionsForLectures(lectureIds){
+    const ids=(lectureIds||[]).filter(Boolean);
+    if(!ids.length){ setState({dbQuestions: []}); return; }
+    const {data} = await sb.from('questions').select('*')
+      .eq('is_active', true).in('lecture_id', ids).order('created_at');
+    setState({dbQuestions: data||[]});
+  },
+
+  async loadSessions(userId){
+    const {data} = await sb.from('sessions').select('*')
+      .eq('user_id', userId).order('started_at', {ascending:false});
+    setState({dbSessions: data||[]});
+  },
+
+  async loadQuestionCount(){
+    const {count} = await sb.from('questions').select('id', {count:'exact', head:true}).eq('is_active', true);
+    setState({dbQuestionCount: count||0});
+  },
+
   async loadFlags(userId){
     const {data} = await sb.from('question_flags').select('question_id').eq('user_id', userId);
     const flags = {};
@@ -376,8 +410,8 @@ const DB = {
     if(!S.profile) return null;
     const {data} = await sb.from('sessions').insert({
       user_id: S.profile.id,
-      subject_id: subjectId||S.subjectId,
-      lecture_id: lectureId||S.lectureId,
+      subject_id: subjectId||null,
+      lecture_id: lectureId||null,
       mode, label, status:'active', total_questions: totalQ,
     }).select().single();
     return data?.id || null;
@@ -408,6 +442,7 @@ const DB = {
       answered, correct,
     }).eq('id', S.activeSessionId);
     setState({activeSessionId:null});
+    if(S.profile) await DB.loadSessions(S.profile.id); // refresh real stats
   },
 
   async loadUsers(){
@@ -503,8 +538,8 @@ function renderLogin(){
         <h1 style="font-weight:800;font-size:44px;line-height:1.08;color:#fff;letter-spacing:-1.4px;margin:0 0 16px;max-width:460px">Solve more.<br>Score higher.</h1>
         <p style="font-weight:400;font-size:17px;line-height:1.6;color:#9aa3b2;margin:0;max-width:430px">High-volume MCQ practice built for the Iraqi 5th-stage curriculum. Pick a subject, open a lecture, start solving in seconds.</p>
         <div style="display:flex;gap:30px;margin-top:34px">
-          <div><div style="font-weight:800;font-size:26px;color:#fff">50k+</div><div style="font-weight:500;font-size:13px;color:#6b7383">MCQs</div></div>
-          <div><div style="font-weight:800;font-size:26px;color:#fff">10</div><div style="font-weight:500;font-size:13px;color:#6b7383">Subjects</div></div>
+          <div><div style="font-weight:800;font-size:26px;color:#fff">16</div><div style="font-weight:500;font-size:13px;color:#6b7383">Specialties</div></div>
+          <div><div style="font-weight:800;font-size:26px;color:#fff">294</div><div style="font-weight:500;font-size:13px;color:#6b7383">Lectures</div></div>
           <div><div style="font-weight:800;font-size:26px;color:#fff">A–E</div><div style="font-weight:500;font-size:13px;color:#6b7383">Single best</div></div>
         </div>
       </div>
@@ -667,14 +702,15 @@ function renderApp(){
   const lectures=lecturesFor(S.subjectId).map((l,i)=>({...l,num:String(i+1).padStart(2,'0'),status:l.pct?(l.pct+'% complete'):'Not started',barColor:l.pct>=70?'var(--green)':(l.pct>=30?'var(--blue)':'var(--yellow)')}));
   const lec=lecturesFor(S.subjectId).find(l=>l.id===S.lectureId)||{name:S.lectureName,q:320};
 
+  const firstName=((S.profile&&(S.profile.full_name||S.profile.username))||'').trim().split(' ')[0];
   const titles={
-    dashboard:['Welcome back, Ahmed','Your revision at a glance'],
+    dashboard:[isGuest?'Welcome':('Welcome back'+(firstName?(', '+firstName):'')),'Your revision at a glance'],
     subjects:['Subjects','Pick a subject to drill into'],
-    lectures:[subj.name,'Choose a lecture'],
-    modeselect:[lec.name,'Choose your practice mode'],
+    lectures:[subj.name,'Choose a lecture or test the whole subject'],
+    modeselect:[S.testScope?S.testScope.label:lec.name,'Choose your practice mode'],
     results:['Session results',S.sessionLecture],
     analytics:['Analytics','Your performance over time'],
-    admin:['Admin console','Manage students, questions & imports'],
+    admin:['Admin console','Manage students & the question bank'],
   };
   const tt=titles[scr]||['Square QBank',''];
 
@@ -682,13 +718,35 @@ function renderApp(){
   let pageHTML='';
 
   if(scr==='dashboard'){
-    const stats=[
-      {icon:'quiz',color:'var(--blue)',label:'Solved this week',value:'1,240',note:'+18% vs last week'},
-      {icon:'target',color:'var(--green)',label:'Overall accuracy',value:'76%',note:'4,820 answered'},
-      {icon:'local_fire_department',color:'var(--yellow-ink)',label:'Study streak',value:'12 days',note:'Keep it going'},
-      {icon:'flag',color:'var(--red)',label:'Flagged',value:'37',note:'Saved for review'},
-    ];
+    const st=userStats();
+    const last=(S.dbSessions||[])[0];
+    const lastSubj=last?subjects.find(x=>x.id===last.subject_id):null;
     const topSubjects=subjects.slice(0,4);
+    const stats=[
+      {icon:'quiz',color:'var(--blue)',label:'Questions solved',value:fmt(st.answered),note:st.weekAnswered?('+'+fmt(st.weekAnswered)+' this week'):'No activity this week'},
+      {icon:'target',color:'var(--green)',label:'Overall accuracy',value:st.accuracy==null?'—':st.accuracy+'%',note:st.answered?(fmt(st.answered)+' answered'):'No answers yet'},
+      {icon:'history_edu',color:'var(--yellow-ink)',label:'Sessions done',value:fmt(st.completed),note:st.sessions?(fmt(st.sessions)+' started'):'None yet'},
+      {icon:'flag',color:'var(--red)',label:'Flagged',value:fmt(st.flagged),note:'Saved for review'},
+    ];
+    const nonGuestHero = last
+      ? `<div class="results-hero" style="display:flex;align-items:center;gap:24px;padding:26px 28px;border-radius:18px;background:linear-gradient(110deg,#13265a,#1f4aa8 55%,#2767e0);color:#fff;box-shadow:0 14px 40px rgba(39,103,224,.28);position:relative;overflow:hidden;margin-bottom:24px">
+            <div style="position:absolute;right:-40px;top:-40px;width:220px;height:220px;border-radius:30px;border:14px solid rgba(243,184,39,.25);transform:rotate(18deg)"></div>
+            <div style="flex:1;position:relative">
+              <div style="font-weight:600;font-size:12.5px;letter-spacing:.5px;text-transform:uppercase;color:#a9c3f5;margin-bottom:8px">Pick up where you left off</div>
+              <div style="font-weight:800;font-size:26px;letter-spacing:-.6px;margin-bottom:6px">${esc(last.label||'Last session')}</div>
+              <div style="font-weight:500;font-size:14px;color:#cdddf9">${fmt(last.answered||0)}/${fmt(last.total_questions||0)} answered · ${esc(last.status)}</div>
+            </div>
+            <button onclick="${lastSubj?`Q.openSubject('${lastSubj.id}')`:'Q.goSubjects()'}" style="display:flex;align-items:center;gap:8px;height:50px;padding:0 24px;border:none;border-radius:13px;background:#fff;color:#1b4fb0;font-weight:800;font-size:15px;cursor:pointer;position:relative;white-space:nowrap"><span class="ms" style="font-size:22px">play_arrow</span>Practice</button>
+          </div>`
+      : `<div class="results-hero" style="display:flex;align-items:center;gap:24px;padding:26px 28px;border-radius:18px;background:linear-gradient(110deg,#13265a,#1f4aa8 55%,#2767e0);color:#fff;box-shadow:0 14px 40px rgba(39,103,224,.28);position:relative;overflow:hidden;margin-bottom:24px">
+            <div style="position:absolute;right:-40px;top:-40px;width:220px;height:220px;border-radius:30px;border:14px solid rgba(243,184,39,.25);transform:rotate(18deg)"></div>
+            <div style="flex:1;position:relative">
+              <div style="font-weight:600;font-size:12.5px;letter-spacing:.5px;text-transform:uppercase;color:#a9c3f5;margin-bottom:8px">Let's get started</div>
+              <div style="font-weight:800;font-size:26px;letter-spacing:-.6px;margin-bottom:6px">${esc(titles.dashboard[0])}</div>
+              <div style="font-weight:500;font-size:14px;color:#cdddf9">Pick a subject and start practising — your progress is saved as you go.</div>
+            </div>
+            <button onclick="Q.goSubjects()" style="display:flex;align-items:center;gap:8px;height:50px;padding:0 24px;border:none;border-radius:13px;background:#fff;color:#1b4fb0;font-weight:800;font-size:15px;cursor:pointer;position:relative;white-space:nowrap"><span class="ms" style="font-size:22px">grid_view</span>Browse subjects</button>
+          </div>`;
     pageHTML=`
     <div style="max-width:1080px;margin:0 auto;animation:fadeUp .35s ease both">
       ${isGuest
@@ -697,19 +755,11 @@ function renderApp(){
             <div style="flex:1;position:relative">
               <div style="font-weight:600;font-size:12.5px;letter-spacing:.5px;text-transform:uppercase;color:#c4a84a;margin-bottom:8px">Browsing as guest</div>
               <div style="font-weight:800;font-size:26px;letter-spacing:-.6px;margin-bottom:6px">Welcome to Square QBank</div>
-              <div style="font-weight:500;font-size:14px;color:#d4c07a">Pick any subject and start solving MCQs now. Sign in to save your progress.</div>
+              <div style="font-weight:500;font-size:14px;color:#d4c07a">Browse the curriculum freely. Sign in to practise and save your progress.</div>
             </div>
             <button onclick="Q.onLogout()" style="display:flex;align-items:center;gap:8px;height:50px;padding:0 24px;border:none;border-radius:13px;background:var(--yellow);color:#3a2000;font-weight:800;font-size:15px;cursor:pointer;position:relative;white-space:nowrap"><span class="ms" style="font-size:22px">login</span>Sign in</button>
           </div>`
-        : `<div class="results-hero" style="display:flex;align-items:center;gap:24px;padding:26px 28px;border-radius:18px;background:linear-gradient(110deg,#13265a,#1f4aa8 55%,#2767e0);color:#fff;box-shadow:0 14px 40px rgba(39,103,224,.28);position:relative;overflow:hidden;margin-bottom:24px">
-            <div style="position:absolute;right:-40px;top:-40px;width:220px;height:220px;border-radius:30px;border:14px solid rgba(243,184,39,.25);transform:rotate(18deg)"></div>
-            <div style="flex:1;position:relative">
-              <div style="font-weight:600;font-size:12.5px;letter-spacing:.5px;text-transform:uppercase;color:#a9c3f5;margin-bottom:8px">Continue where you left off</div>
-              <div style="font-weight:800;font-size:26px;letter-spacing:-.6px;margin-bottom:6px">Medicine · Cardiology</div>
-              <div style="font-weight:500;font-size:14px;color:#cdddf9">Question 6 of 8 · 75% complete · 80% accuracy</div>
-            </div>
-            <button onclick="Q.onResume()" style="display:flex;align-items:center;gap:8px;height:50px;padding:0 24px;border:none;border-radius:13px;background:#fff;color:#1b4fb0;font-weight:800;font-size:15px;cursor:pointer;position:relative;white-space:nowrap"><span class="ms" style="font-size:22px">play_arrow</span>Resume solving</button>
-          </div>`}
+        : nonGuestHero}
 
       <div class="grid-4" style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px">
         ${stats.map(s=>`<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:18px 20px;box-shadow:var(--shadow)">
@@ -719,19 +769,19 @@ function renderApp(){
         </div>`).join('')}
       </div>
 
-      <div style="font-weight:700;font-size:15px;color:var(--text);margin:4px 2px 14px">Quick practice</div>
+      <div style="font-weight:700;font-size:15px;color:var(--text);margin:4px 2px 14px">Quick actions</div>
       <div class="grid-3" style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:30px">
-        <button onclick="Q.onRandom()" style="text-align:left;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:20px;cursor:pointer;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:14px">
-          <span class="ms" style="font-size:26px;color:var(--blue);width:48px;height:48px;background:var(--blue-soft);border-radius:12px;display:flex;align-items:center;justify-content:center">shuffle</span>
-          <div><div style="font-weight:700;font-size:16px;color:var(--text);margin-bottom:3px">Random mixed exam</div><div style="font-weight:500;font-size:13px;color:var(--muted)">40 questions across all subjects, timed.</div></div>
+        <button onclick="Q.goSubjects()" style="text-align:left;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:20px;cursor:pointer;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:14px">
+          <span class="ms" style="font-size:26px;color:var(--blue);width:48px;height:48px;background:var(--blue-soft);border-radius:12px;display:flex;align-items:center;justify-content:center">grid_view</span>
+          <div><div style="font-weight:700;font-size:16px;color:var(--text);margin-bottom:3px">Browse subjects</div><div style="font-weight:500;font-size:13px;color:var(--muted)">${subjects.length} specialties across the curriculum.</div></div>
         </button>
-        <button onclick="Q.onReviewWrong()" style="text-align:left;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:20px;cursor:pointer;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:14px">
-          <span class="ms" style="font-size:26px;color:var(--red);width:48px;height:48px;background:var(--red-soft);border-radius:12px;display:flex;align-items:center;justify-content:center">replay</span>
-          <div><div style="font-weight:700;font-size:16px;color:var(--text);margin-bottom:3px">Review wrong answers</div><div style="font-weight:500;font-size:13px;color:var(--muted)">128 questions you got incorrect.</div></div>
-        </button>
-        <button onclick="Q.onReviewFlagged()" style="text-align:left;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:20px;cursor:pointer;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:14px">
+        <button onclick="Q.openFlagged()" style="text-align:left;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:20px;cursor:pointer;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:14px">
           <span class="ms" style="font-size:26px;color:var(--yellow-ink);width:48px;height:48px;background:var(--yellow-soft);border-radius:12px;display:flex;align-items:center;justify-content:center">flag</span>
-          <div><div style="font-weight:700;font-size:16px;color:var(--text);margin-bottom:3px">Flagged questions</div><div style="font-weight:500;font-size:13px;color:var(--muted)">37 questions saved for later.</div></div>
+          <div><div style="font-weight:700;font-size:16px;color:var(--text);margin-bottom:3px">Flagged questions</div><div style="font-weight:500;font-size:13px;color:var(--muted)">${st.flagged?(fmt(st.flagged)+' saved for review.'):'Nothing flagged yet.'}</div></div>
+        </button>
+        <button onclick="Q.go('analytics')" style="text-align:left;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:20px;cursor:pointer;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:14px">
+          <span class="ms" style="font-size:26px;color:var(--green);width:48px;height:48px;background:var(--green-soft);border-radius:12px;display:flex;align-items:center;justify-content:center">bar_chart</span>
+          <div><div style="font-weight:700;font-size:16px;color:var(--text);margin-bottom:3px">Your analytics</div><div style="font-weight:500;font-size:13px;color:var(--muted)">Track accuracy and progress over time.</div></div>
         </button>
       </div>
 
@@ -741,10 +791,9 @@ function renderApp(){
           <div style="width:46px;height:46px;border-radius:12px;flex:none;background:${s.tileBg};color:${s.tileFg};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:18px">${s.initial}</div>
           <div style="flex:1;min-width:0">
             <div style="font-weight:700;font-size:15.5px;color:var(--text)">${esc(s.name)}</div>
-            <div style="font-weight:500;font-size:12.5px;color:var(--muted);margin:2px 0 8px">${s.qLabel} · ${s.lectures} lectures</div>
-            <div style="height:6px;border-radius:6px;background:var(--surface3);overflow:hidden"><div style="height:100%;width:${s.pct}%;background:${s.tileFg}"></div></div>
+            <div style="font-weight:500;font-size:12.5px;color:var(--muted);margin:2px 0 0">${s.lectures} lectures</div>
           </div>
-          <div style="font-weight:800;font-size:15px;color:var(--text)">${s.pct}%</div>
+          <span class="ms" style="font-size:22px;color:var(--faint);flex:none">chevron_right</span>
         </button>`).join('')}
       </div>
     </div>`;
@@ -780,31 +829,55 @@ function renderApp(){
   }
 
   else if(scr==='lectures'){
+    const totalLec=lectures.length;
+    const pickedCount=lectures.filter(l=>S.selectedLectures[l.id]).length;
+    const testLabel=pickedCount?`Test ${pickedCount} selected lecture${pickedCount>1?'s':''}`:`Test all ${totalLec} lectures`;
     pageHTML=`
     <div style="max-width:880px;margin:0 auto;animation:fadeUp .35s ease both">
       <button onclick="Q.goSubjects()" style="display:flex;align-items:center;gap:6px;font-weight:600;font-size:13.5px;color:var(--muted);background:none;border:none;cursor:pointer;margin-bottom:16px"><span class="ms" style="font-size:18px">arrow_back</span>All subjects</button>
-      <div style="display:flex;align-items:center;gap:16px;margin-bottom:22px">
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:18px">
         <div style="width:56px;height:56px;border-radius:15px;flex:none;background:${subj.tileBg};color:${subj.tileFg};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:22px">${subj.initial}</div>
-        <div><div style="font-weight:800;font-size:24px;letter-spacing:-.6px;color:var(--text)">${esc(subj.name)}</div><div style="font-weight:500;font-size:13.5px;color:var(--muted)">${subj.qLabel} MCQs · ${subj.lectures} lectures · ${subj.pct}% complete</div></div>
+        <div><div style="font-weight:800;font-size:24px;letter-spacing:-.6px;color:var(--text)">${esc(subj.name)}</div><div style="font-weight:500;font-size:13.5px;color:var(--muted)">${subj.lectures} lectures</div></div>
       </div>
+
+      <div style="background:var(--surface);border:1.5px solid var(--blue);border-radius:16px;padding:18px 20px;box-shadow:var(--shadow);margin-bottom:14px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+        <span class="ms" style="font-size:26px;color:var(--blue);width:46px;height:46px;background:var(--blue-soft);border-radius:12px;display:flex;align-items:center;justify-content:center;flex:none">fact_check</span>
+        <div style="flex:1;min-width:180px">
+          <div style="font-weight:700;font-size:15.5px;color:var(--text)">Test yourself across ${esc(subj.name)}</div>
+          <div style="font-weight:500;font-size:12.5px;color:var(--muted)">${pickedCount?`${pickedCount} of ${totalLec} lectures selected`:`Pick lectures below, or test the whole subject (all ${totalLec}).`}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <button onclick="Q.selectAllLectures()" style="height:38px;padding:0 13px;border:1px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text);font-weight:600;font-size:13px;cursor:pointer">Select all</button>
+          ${pickedCount?`<button onclick="Q.clearLectureSelection()" style="height:38px;padding:0 13px;border:1px solid var(--border);border-radius:10px;background:var(--surface);color:var(--muted);font-weight:600;font-size:13px;cursor:pointer">Clear</button>`:''}
+          <button onclick="Q.startSubjectTest()" style="display:flex;align-items:center;gap:7px;height:38px;padding:0 16px;border:none;border-radius:10px;background:var(--blue);color:#fff;font-weight:700;font-size:13.5px;cursor:pointer">${testLabel}<span class="ms" style="font-size:18px">arrow_forward</span></button>
+        </div>
+      </div>
+
       <div style="display:flex;flex-direction:column;gap:10px">
-        ${lectures.map(l=>`<button onclick="Q.openLecture('${l.id}','${esc(l.name)}')" style="display:flex;align-items:center;gap:16px;text-align:left;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px 18px;cursor:pointer;box-shadow:var(--shadow)">
-          <div style="width:38px;height:38px;border-radius:10px;flex:none;background:var(--surface3);color:var(--muted);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;font-family:'JetBrains Mono'">${l.num}</div>
-          <div style="flex:1;min-width:0"><div style="font-weight:700;font-size:15.5px;color:var(--text)">${esc(l.name)}</div><div style="font-weight:500;font-size:12.5px;color:var(--muted)">${l.q} questions · ${l.status}</div></div>
-          <div style="width:120px;flex:none"><div style="height:6px;border-radius:6px;background:var(--surface3);overflow:hidden"><div style="height:100%;width:${l.pct}%;background:${l.barColor}"></div></div></div>
-          <div style="font-weight:800;font-size:14px;color:var(--text);width:42px;text-align:right">${l.pct}%</div>
-          <span class="ms" style="font-size:22px;color:var(--faint)">chevron_right</span>
-        </button>`).join('')}
+        ${lectures.map(l=>{const sel=!!S.selectedLectures[l.id];return `<div style="display:flex;align-items:center;gap:14px;background:var(--surface);border:1.5px solid ${sel?'var(--blue)':'var(--border)'};border-radius:14px;padding:14px 16px;box-shadow:var(--shadow)">
+          <button onclick="Q.toggleLecture('${l.id}')" title="Add to subject test" style="width:24px;height:24px;flex:none;border-radius:7px;border:1.5px solid ${sel?'var(--blue)':'var(--border)'};background:${sel?'var(--blue)':'var(--surface)'};color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0">${sel?`<span class="ms" style="font-size:17px">check</span>`:''}</button>
+          <div onclick="Q.openLecture('${l.id}','${esc(l.name)}')" style="flex:1;min-width:0;display:flex;align-items:center;gap:14px;cursor:pointer">
+            <div style="width:36px;height:36px;border-radius:10px;flex:none;background:var(--surface3);color:var(--muted);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;font-family:'JetBrains Mono'">${l.num}</div>
+            <div style="flex:1;min-width:0"><div style="font-weight:700;font-size:15.5px;color:var(--text)">${esc(l.name)}</div><div style="font-weight:500;font-size:12.5px;color:var(--muted)">Tap to practise this lecture</div></div>
+            <span class="ms" style="font-size:22px;color:var(--faint);flex:none">chevron_right</span>
+          </div>
+        </div>`;}).join('')}
       </div>
     </div>`;
   }
 
   else if(scr==='modeselect'){
+    const scope=S.testScope||{type:'lecture',lectureIds:S.lectureId?[S.lectureId]:[],label:lec.name};
+    const lecCount=(scope.lectureIds||[]).length||1;
+    const scopeDesc=scope.type==='subject'?`${lecCount} lectures · choose how you want to practise`:'Choose how you want to practise';
+    const prior=(S.dbSessions||[]).find(s=>s.label===scope.label && (s.answered||0)>0);
+    const priorAcc=prior?Math.round(prior.correct/prior.answered*100):null;
     pageHTML=`
     <div style="max-width:760px;margin:0 auto;animation:fadeUp .35s ease both">
       <button onclick="Q.onBackToLectures()" style="display:flex;align-items:center;gap:6px;font-weight:600;font-size:13.5px;color:var(--muted);background:none;border:none;cursor:pointer;margin-bottom:16px"><span class="ms" style="font-size:18px">arrow_back</span>${esc(subj.name)}</button>
-      <h2 style="font-weight:800;font-size:26px;letter-spacing:-.7px;color:var(--text);margin:0 0 4px">${esc(lec.name)}</h2>
-      <p style="font-weight:500;font-size:14px;color:var(--muted);margin:0 0 24px">${lec.q} questions · choose how you want to practise</p>
+      <h2 style="font-weight:800;font-size:26px;letter-spacing:-.7px;color:var(--text);margin:0 0 4px">${esc(scope.label)}</h2>
+      <p style="font-weight:500;font-size:14px;color:var(--muted);margin:0 0 24px">${scopeDesc}</p>
+      ${S.practiceError?`<div style="display:flex;align-items:center;gap:9px;padding:12px 16px;border-radius:12px;background:var(--red-soft);border:1px solid var(--red);margin-bottom:18px"><span class="ms" style="font-size:20px;color:var(--red)">info</span><span style="font-weight:500;font-size:13.5px;color:var(--red)">${esc(S.practiceError)}</span></div>`:''}
       <div class="mode-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:22px">
         <button onclick="Q.onStartStudy()" style="text-align:left;background:var(--surface);border:2px solid var(--blue);border-radius:18px;padding:24px;cursor:pointer;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:14px">
           <span class="ms" style="font-size:28px;color:var(--blue);width:52px;height:52px;background:var(--blue-soft);border-radius:14px;display:flex;align-items:center;justify-content:center">school</span>
@@ -812,13 +885,13 @@ function renderApp(){
         </button>
         <button onclick="Q.onStartExam()" style="text-align:left;background:var(--surface);border:2px solid var(--border);border-radius:18px;padding:24px;cursor:pointer;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:14px">
           <span class="ms" style="font-size:28px;color:var(--yellow-ink);width:52px;height:52px;background:var(--yellow-soft);border-radius:14px;display:flex;align-items:center;justify-content:center">timer</span>
-          <div><div style="font-weight:800;font-size:18px;color:var(--text);margin-bottom:4px">Exam mode</div><div style="font-weight:500;font-size:13.5px;line-height:1.5;color:var(--muted)">Timed, no feedback until the end. Simulates real exam conditions.</div></div>
+          <div><div style="font-weight:800;font-size:18px;color:var(--text);margin-bottom:4px">Exam mode</div><div style="font-weight:500;font-size:13.5px;line-height:1.5;color:var(--muted)">Timed, shuffled, no feedback until the end. Simulates real exam conditions.</div></div>
         </button>
       </div>
-      <div style="display:flex;align-items:center;gap:10px;padding:14px 16px;border-radius:12px;background:var(--surface2);border:1px solid var(--border)">
+      ${priorAcc!=null?`<div style="display:flex;align-items:center;gap:10px;padding:14px 16px;border-radius:12px;background:var(--surface2);border:1px solid var(--border)">
         <span class="ms" style="font-size:20px;color:var(--green)">history</span>
-        <span style="font-weight:500;font-size:13.5px;color:var(--muted)">Previous attempt: <b style="color:var(--text)">80% accuracy</b> · last solved 2 days ago</span>
-      </div>
+        <span style="font-weight:500;font-size:13.5px;color:var(--muted)">Previous attempt: <b style="color:var(--text)">${priorAcc}% accuracy</b> · ${prior.answered} answered</span>
+      </div>`:''}
     </div>`;
   }
 
@@ -868,69 +941,73 @@ function renderApp(){
 
   else if(scr==='analytics'){
     const accColor=a=>a>=80?'var(--green)':(a>=68?'var(--blue)':'var(--yellow-ink)');
-    const anStats=[
-      {label:'Total answered',value:'4,820',note:'across 6 subjects',color:'var(--text)'},
-      {label:'Overall accuracy',value:'76%',note:'+4% this month',color:'var(--green)'},
-      {label:'Avg. time / Q',value:'48s',note:'faster than goal',color:'var(--blue)'},
-      {label:'Best subject',value:'ENT',note:'82% accuracy',color:'var(--text)'},
-    ];
-    const wk=[['Sa',40],['Su',62],['Mo',78],['Tu',55],['We',90],['Th',70],['Fr',48]];
-    const subjAccuracy=[['ENT',82],['Medical Ethics',88],['Medicine',78],['Gynaecology',74],['Psychiatry',70]];
-    pageHTML=`
-    <div style="max-width:1080px;margin:0 auto;animation:fadeUp .35s ease both">
-      <div class="grid-4" style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:22px">
-        ${anStats.map(s=>`<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:18px 20px;box-shadow:var(--shadow)"><div style="font-weight:600;font-size:13px;color:var(--muted);margin-bottom:10px">${s.label}</div><div style="font-weight:800;font-size:28px;letter-spacing:-1px;color:${s.color}">${s.value}</div><div style="font-weight:500;font-size:12px;color:var(--faint);margin-top:2px">${s.note}</div></div>`).join('')}
-      </div>
-      <div class="an-grid" style="display:grid;grid-template-columns:1.4fr 1fr;gap:16px">
-        <div style="background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:22px;box-shadow:var(--shadow)">
-          <div style="font-weight:700;font-size:15px;color:var(--text);margin-bottom:18px">Questions solved this week</div>
-          <div style="display:flex;align-items:flex-end;gap:12px;height:160px">
-            ${wk.map(([day,h],i)=>`<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:8px;height:100%;justify-content:flex-end">
-              <div style="width:100%;border-radius:7px 7px 0 0;background:${i===4?'var(--yellow)':'var(--blue)'};height:${h}%;min-height:5px"></div>
-              <div style="font-weight:600;font-size:11px;color:var(--muted)">${day}</div>
-            </div>`).join('')}
+    const st=userStats();
+    const ss=S.dbSessions||[];
+    if(!ss.length){
+      pageHTML=`
+      <div style="max-width:1080px;margin:0 auto;animation:fadeUp .35s ease both">
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow);padding:60px 30px;text-align:center">
+          <span class="ms" style="font-size:46px;color:var(--faint)">bar_chart</span>
+          <div style="font-weight:800;font-size:20px;color:var(--text);margin:14px 0 6px">No activity yet</div>
+          <div style="font-weight:500;font-size:14px;color:var(--muted);margin-bottom:22px">Complete a practice session and your accuracy and progress will show up here.</div>
+          <button onclick="Q.goSubjects()" style="height:46px;padding:0 22px;border:none;border-radius:12px;background:var(--blue);color:#fff;font-weight:700;font-size:15px;cursor:pointer;display:inline-flex;align-items:center;gap:8px"><span class="ms" style="font-size:20px">grid_view</span>Browse subjects</button>
+        </div>
+      </div>`;
+    } else {
+      // last 7 days bar chart (answered per day)
+      const days=[];const dayNames=['Su','Mo','Tu','We','Th','Fr','Sa'];
+      for(let i=6;i>=0;i--){const d=new Date();d.setHours(0,0,0,0);d.setDate(d.getDate()-i);days.push({key:d.getTime(),label:dayNames[d.getDay()],n:0});}
+      ss.forEach(s=>{const d=new Date(s.started_at);d.setHours(0,0,0,0);const slot=days.find(x=>x.key===d.getTime());if(slot)slot.n+=(s.answered||0);});
+      const maxN=Math.max(1,...days.map(d=>d.n));
+      // accuracy by subject (from completed sessions)
+      const bySubj={};
+      ss.forEach(s=>{if(!s.subject_id)return;const o=bySubj[s.subject_id]||(bySubj[s.subject_id]={a:0,c:0});o.a+=(s.answered||0);o.c+=(s.correct||0);});
+      const subjMap={};subjectsData().forEach(x=>subjMap[x.id]=x.name);
+      const subjAccuracy=Object.keys(bySubj).map(id=>({name:subjMap[id]||id,a:bySubj[id].a,acc:bySubj[id].a?Math.round(bySubj[id].c/bySubj[id].a*100):0})).filter(x=>x.a>0).sort((x,y)=>y.acc-x.acc).slice(0,8);
+      const best=subjAccuracy[0];
+      const anStats=[
+        {label:'Total answered',value:fmt(st.answered),note:`${ss.length} session${ss.length>1?'s':''}`,color:'var(--text)'},
+        {label:'Overall accuracy',value:st.accuracy==null?'—':st.accuracy+'%',note:`${fmt(st.correct)} correct`,color:'var(--green)'},
+        {label:'Sessions completed',value:fmt(st.completed),note:'practice runs',color:'var(--blue)'},
+        {label:'Best subject',value:best?best.name:'—',note:best?best.acc+'% accuracy':'—',color:'var(--text)'},
+      ];
+      pageHTML=`
+      <div style="max-width:1080px;margin:0 auto;animation:fadeUp .35s ease both">
+        <div class="grid-4" style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:22px">
+          ${anStats.map(s=>`<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:18px 20px;box-shadow:var(--shadow)"><div style="font-weight:600;font-size:13px;color:var(--muted);margin-bottom:10px">${s.label}</div><div style="font-weight:800;font-size:28px;letter-spacing:-1px;color:${s.color}">${esc(String(s.value))}</div><div style="font-weight:500;font-size:12px;color:var(--faint);margin-top:2px">${esc(s.note)}</div></div>`).join('')}
+        </div>
+        <div class="an-grid" style="display:grid;grid-template-columns:1.4fr 1fr;gap:16px">
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:22px;box-shadow:var(--shadow)">
+            <div style="font-weight:700;font-size:15px;color:var(--text);margin-bottom:18px">Questions solved this week</div>
+            <div style="display:flex;align-items:flex-end;gap:12px;height:160px">
+              ${days.map(d=>`<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:8px;height:100%;justify-content:flex-end">
+                <div style="width:100%;border-radius:7px 7px 0 0;background:var(--blue);height:${Math.round(d.n/maxN*100)}%;min-height:4px"></div>
+                <div style="font-weight:600;font-size:11px;color:var(--muted)">${d.label}</div>
+              </div>`).join('')}
+            </div>
+          </div>
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:22px;box-shadow:var(--shadow)">
+            <div style="font-weight:700;font-size:15px;color:var(--text);margin-bottom:16px">Accuracy by subject</div>
+            ${subjAccuracy.length?`<div style="display:flex;flex-direction:column;gap:13px">
+              ${subjAccuracy.map(x=>`<div>
+                <div style="display:flex;justify-content:space-between;font-weight:600;font-size:12.5px;color:var(--text);margin-bottom:5px"><span>${esc(x.name)}</span><span style="color:${accColor(x.acc)}">${x.acc}%</span></div>
+                <div style="height:7px;border-radius:7px;background:var(--surface3);overflow:hidden"><div style="height:100%;width:${x.acc}%;background:${accColor(x.acc)}"></div></div>
+              </div>`).join('')}
+            </div>`:`<div style="font-weight:500;font-size:13px;color:var(--muted);padding:18px 0">Subject-level accuracy appears once you complete subject tests.</div>`}
           </div>
         </div>
-        <div style="background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:22px;box-shadow:var(--shadow)">
-          <div style="font-weight:700;font-size:15px;color:var(--text);margin-bottom:16px">Accuracy by subject</div>
-          <div style="display:flex;flex-direction:column;gap:13px">
-            ${subjAccuracy.map(([name,a])=>`<div>
-              <div style="display:flex;justify-content:space-between;font-weight:600;font-size:12.5px;color:var(--text);margin-bottom:5px"><span>${esc(name)}</span><span style="color:${accColor(a)}">${a}%</span></div>
-              <div style="height:7px;border-radius:7px;background:var(--surface3);overflow:hidden"><div style="height:100%;width:${a}%;background:${accColor(a)}"></div></div>
-            </div>`).join('')}
-          </div>
-        </div>
-      </div>
-    </div>`;
+      </div>`;
+    }
   }
 
   else if(scr==='admin'){
     const adminStats=[
-      {icon:'group',color:'var(--blue)',label:'Total students',value:'1,284'},
-      {icon:'bolt',color:'var(--green)',label:'Active today',value:'412'},
-      {icon:'quiz',color:'var(--yellow-ink)',label:'Total MCQs',value:'50,240'},
-      {icon:'upload',color:'var(--blue)',label:'Added this week',value:'1,860'},
+      {icon:'group',color:'var(--blue)',label:'Total students',value:fmt(S.dbUsers.length)},
+      {icon:'menu_book',color:'var(--green)',label:'Subjects',value:fmt(S.dbSubjects.length)},
+      {icon:'list_alt',color:'var(--yellow-ink)',label:'Lectures',value:fmt(S.dbLectures.length)},
+      {icon:'quiz',color:'var(--blue)',label:'Total MCQs',value:fmt(S.dbQuestionCount)},
     ];
-    const tabs=[['users','Students'],['questions','Questions'],['import','Import MCQs']];
-    const usersRaw=[
-      {name:'Ahmed Al-Rashid',username:'ahmed.r',hue:255,status:'Active',device:'Registered',lastSeen:'2 min ago'},
-      {name:'Zainab Hassan',username:'zainab.h',hue:330,status:'Active',device:'Registered',lastSeen:'18 min ago'},
-      {name:'Mustafa Kareem',username:'mustafa.k',hue:150,status:'Active',device:'Locked',lastSeen:'1 hour ago'},
-      {name:'Noor Abdullah',username:'noor.a',hue:48,status:'Inactive',device:'Registered',lastSeen:'3 days ago'},
-      {name:'Hussein Ali',username:'hussein.a',hue:200,status:'Active',device:'Registered',lastSeen:'5 min ago'},
-      {name:'Fatima Jasim',username:'fatima.j',hue:288,status:'Inactive',device:'Locked',lastSeen:'2 weeks ago'},
-    ];
-    const adminQuestions=[
-      {stem:'ST-elevation in II, III, aVF indicates occlusion of which artery?',subject:'Medicine',lecture:'Cardiology',answer:'C'},
-      {stem:'Most common cause of mitral stenosis worldwide?',subject:'Medicine',lecture:'Cardiology',answer:'C'},
-      {stem:'First-line drug for symptom control in stable angina?',subject:'Medicine',lecture:'Cardiology',answer:'A'},
-      {stem:'Earliest ECG finding in hyperkalaemia?',subject:'Medicine',lecture:'Cardiology',answer:'B'},
-      {stem:'Pansystolic murmur radiating to the axilla suggests?',subject:'Medicine',lecture:'Cardiology',answer:'B'},
-    ];
-    const importCols=[
-      {key:'subject',desc:'Subject name'},{key:'lecture',desc:'Lecture name'},{key:'question',desc:'Question stem'},
-      {key:'option_a … option_e',desc:'Five choices'},{key:'answer',desc:'Correct letter A–E'},{key:'explanation',desc:'Optional rationale'},
-    ];
+    const tabs=[['users','Students'],['questions','Questions']];
 
     // modals (rendered outside main flow, overlaid)
     const modalOverlay=`position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;display:flex;align-items:center;justify-content:center;padding:16px`;
@@ -1013,48 +1090,16 @@ function renderApp(){
               </div>`;}).join('')}
         </div></div>
       </div>`;
-    } else if(S.adminTab==='questions'){
+    } else {
       tabContent=`<div style="background:var(--surface);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow);overflow:hidden">
         <div style="display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid var(--border)">
           <span style="font-weight:700;font-size:15px;color:var(--text)">Question bank</span>
-          <span style="font-weight:500;font-size:12.5px;color:var(--muted)">50,240 total</span>
-          <div style="flex:1"></div>
-          <button style="display:flex;align-items:center;gap:7px;height:40px;padding:0 16px;border:none;border-radius:10px;background:var(--blue);color:#fff;font-weight:700;font-size:13.5px;cursor:pointer"><span class="ms" style="font-size:19px">add</span>Add question</button>
+          <span style="font-weight:500;font-size:12.5px;color:var(--muted)">${fmt(S.dbQuestionCount)} total</span>
         </div>
-        <div style="overflow-x:auto"><div style="min-width:660px">
-          <div style="display:grid;grid-template-columns:3fr 1.1fr 1.2fr .7fr 70px;padding:11px 20px;border-bottom:1px solid var(--border);background:var(--surface2);font-weight:700;font-size:11.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">
-            <div>Question</div><div>Subject</div><div>Lecture</div><div>Answer</div><div></div>
-          </div>
-          ${adminQuestions.map(q=>`<div style="display:grid;grid-template-columns:3fr 1.1fr 1.2fr .7fr 70px;align-items:center;padding:13px 20px;border-bottom:1px solid var(--border2)">
-            <div style="font-weight:500;font-size:13.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:14px">${esc(q.stem)}</div>
-            <div style="font-weight:500;font-size:12.5px;color:var(--muted)">${q.subject}</div>
-            <div style="font-weight:500;font-size:12.5px;color:var(--muted)">${q.lecture}</div>
-            <div><span style="font-weight:700;font-size:12px;color:var(--blue);background:var(--blue-soft);padding:3px 9px;border-radius:7px">${q.answer}</span></div>
-            <div style="display:flex;gap:8px;justify-content:flex-end"><span class="ms" style="font-size:19px;color:var(--faint);cursor:pointer">edit</span><span class="ms" style="font-size:19px;color:var(--faint);cursor:pointer">delete</span></div>
-          </div>`).join('')}
-        </div></div>
-      </div>`;
-    } else {
-      tabContent=`<div class="an-grid" style="display:grid;grid-template-columns:1.3fr 1fr;gap:16px">
-        <div style="background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:24px;box-shadow:var(--shadow)">
-          <div style="font-weight:700;font-size:16px;color:var(--text);margin-bottom:4px">Bulk import MCQs</div>
-          <div style="font-weight:500;font-size:13px;color:var(--muted);margin-bottom:18px">Upload an Excel sheet — thousands of questions at once.</div>
-          <div style="border:2px dashed var(--border);border-radius:14px;padding:28px;text-align:center;background:var(--surface2);margin-bottom:16px">
-            <span class="ms" style="font-size:38px;color:var(--blue)">upload_file</span>
-            <div style="font-weight:700;font-size:15px;color:var(--text);margin:8px 0 3px">Drop your .xlsx file here</div>
-            <div style="font-weight:500;font-size:12.5px;color:var(--muted)">or click to browse · .xlsx, .csv · up to 10,000 rows</div>
-          </div>
-          <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border:1px solid var(--border);border-radius:11px;margin-bottom:14px">
-            <div style="display:flex;align-items:center;gap:11px"><span class="ms" style="font-size:24px;color:var(--green)">description</span><div><div style="font-weight:600;font-size:13.5px;color:var(--text)">questions_cardiology.xlsx</div><div style="font-weight:500;font-size:12px;color:var(--muted)">320 rows detected · choices mapped A–E</div></div></div>
-            <span class="ms" style="font-size:20px;color:var(--green);font-variation-settings:'FILL' 1">check_circle</span>
-          </div>
-          ${S.importing?`<div style="height:9px;border-radius:9px;background:var(--surface3);overflow:hidden;margin-bottom:8px"><div style="height:100%;width:${S.importPct}%;background:linear-gradient(90deg,var(--blue),var(--yellow));transition:width .2s"></div></div>
-          <div style="font-weight:600;font-size:12.5px;color:var(--muted);margin-bottom:14px">${S.importDone?'Imported 320 questions successfully.':'Importing… '+S.importPct+'%'}</div>`:''}
-          <button onclick="Q.onImport()" style="width:100%;height:48px;border:none;border-radius:12px;background:var(--blue);color:#fff;font-weight:700;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px"><span class="ms" style="font-size:20px">cloud_upload</span>${S.importDone?'Import complete':(S.importing?'Importing…':'Import 320 questions')}</button>
-        </div>
-        <div style="background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:22px;box-shadow:var(--shadow)">
-          <div style="font-weight:700;font-size:15px;color:var(--text);margin-bottom:8px">Required columns</div>
-          ${importCols.map(c=>`<div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border2)"><span class="ms" style="font-size:18px;color:var(--green)">check</span><span style="font-weight:600;font-size:13px;font-family:'JetBrains Mono';color:var(--text)">${esc(c.key)}</span><span style="flex:1"></span><span style="font-weight:500;font-size:12px;color:var(--muted)">${esc(c.desc)}</span></div>`).join('')}
+        <div style="padding:54px 30px;text-align:center">
+          <span class="ms" style="font-size:42px;color:var(--faint)">quiz</span>
+          <div style="font-weight:800;font-size:18px;color:var(--text);margin:12px 0 6px">${S.dbQuestionCount?(fmt(S.dbQuestionCount)+' questions in the bank'):'No questions yet'}</div>
+          <div style="font-weight:500;font-size:13.5px;color:var(--muted);max-width:480px;margin:0 auto;line-height:1.6">Question authoring and bulk MCQ upload are coming soon. The ${fmt(S.dbSubjects.length)} subjects and ${fmt(S.dbLectures.length)} lectures are already in place and ready for content.</div>
         </div>
       </div>`;
     }
@@ -1090,9 +1135,9 @@ function renderApp(){
             </div>`
           : (()=>{
               const p=S.profile;
-              const displayName=p?p.full_name||p.username:'Ahmed Al-Rashid';
-              const initial=(displayName[0]||'A').toUpperCase();
-              const sub=p?`${p.stage}th stage · ${p.username}`:'5th stage · ahmed.r';
+              const displayName=p?(p.full_name||p.username):'Student';
+              const initial=(displayName[0]||'S').toUpperCase();
+              const sub=p?(p.role==='admin'?`Administrator · ${p.username}`:`${p.stage}th stage · ${p.username}`):'';
               return `<div style="display:flex;align-items:center;gap:11px;padding:10px 12px;margin-top:4px;border-radius:10px">
                 <div style="width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--blue),var(--yellow));display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px;color:#fff">${esc(initial)}</div>
                 <div style="min-width:0;flex:1"><div style="font-weight:700;font-size:13.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(displayName)}</div><div style="font-weight:500;font-size:11.5px;color:var(--muted)">${esc(sub)}</div></div>
@@ -1116,7 +1161,7 @@ function renderApp(){
         <button class="mobile-only" onclick="Q.onToggleTheme()" style="width:42px;height:42px;border:1px solid var(--border);border-radius:11px;background:var(--surface);color:var(--text);cursor:pointer;align-items:center;justify-content:center"><span class="ms" style="font-size:21px">${themeIcon}</span></button>
         ${isGuest
           ? `<button onclick="Q.onLogout()" style="display:flex;align-items:center;gap:8px;height:42px;padding:0 16px;border:1.5px solid var(--yellow);border-radius:11px;background:var(--yellow-soft);color:var(--yellow-ink);font-weight:700;font-size:14px;cursor:pointer;white-space:nowrap"><span class="ms" style="font-size:19px">login</span><span class="rlabel">Sign in</span></button>`
-          : `<button onclick="Q.onResume()" style="display:flex;align-items:center;gap:8px;height:42px;padding:0 16px;border:none;border-radius:11px;background:var(--blue);color:#fff;font-weight:700;font-size:14px;cursor:pointer;white-space:nowrap"><span class="ms" style="font-size:19px">play_arrow</span><span class="rlabel">Resume</span></button>`}
+          : `<button onclick="Q.goSubjects()" style="display:flex;align-items:center;gap:8px;height:42px;padding:0 16px;border:none;border-radius:11px;background:var(--blue);color:#fff;font-weight:700;font-size:14px;cursor:pointer;white-space:nowrap"><span class="ms" style="font-size:19px">grid_view</span><span class="rlabel">Practice</span></button>`}
       </header>
 
       <div class="content-pad" style="flex:1;overflow:auto;padding:30px">
