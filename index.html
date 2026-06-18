@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Square QBank</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Figtree:ital,wght@0,400;0,500;0,600;0,700;0,800;0,900&family=JetBrains+Mono:wght@500;600;700&family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,400,0,0&display=swap" rel="stylesheet">
@@ -65,9 +66,28 @@ button{font-family:Figtree,sans-serif}
 <body>
 <div id="app"></div>
 <script>
+/* ── Supabase ── */
+const SUPABASE_URL  = 'https://dxpempiqkdemoluscxee.supabase.co';
+const SUPABASE_KEY  = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR4cGVtcGlxa2RlbW9sdXNjeGVlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE4MDAzMDQsImV4cCI6MjA5NzM3NjMwNH0.WEZnUgnhi0UZrkkijcfaLqu_VcVzSlaxmoOodHUHt4A';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+/* device fingerprint (stable across reloads) */
+function getDeviceFP(){
+  const nav = [navigator.userAgent, navigator.language, screen.width+'x'+screen.height, new Date().getTimezoneOffset()].join('|');
+  let h=0; for(let i=0;i<nav.length;i++){h=Math.imul(31,h)+nav.charCodeAt(i)|0;} return 'fp_'+(h>>>0).toString(36);
+}
+
 /* ── state ── */
 const S = {
   theme:'light', screen:'login', role:'user',
+  profile:null,          // {id, username, full_name, role, stage}
+  dbQuestions:[],        // questions loaded from Supabase
+  dbSubjects:[],         // subjects loaded from Supabase
+  dbLectures:[],         // lectures loaded from Supabase
+  dbUsers:[],            // admin: students list
+  activeSessionId:null,  // current session UUID
+  deviceStatus:'ok',     // 'ok' | 'registered' | 'locked'
+  authError:'',
   subjectId:'medicine', lectureId:'cardio', lectureName:'Cardiology',
   sessionSubject:'Medicine', sessionLecture:'Cardiology',
   mode:'study', queue:[0,1,2,3,4,5,6,7], qPos:0,
@@ -79,7 +99,14 @@ let _timerInterval = null;
 let _importInterval = null;
 
 /* ── data ── */
-function subjectsData(){return[
+function subjectsData(){
+  if(S.dbSubjects.length){
+    return S.dbSubjects.map(s=>{
+      const lecs=S.dbLectures.filter(l=>l.subject_id===s.id);
+      return {id:s.id,name:s.name,hue:s.hue,lectures:lecs.length||1,q:0,pct:0,acc:0};
+    });
+  }
+  return[
   {id:'medicine',name:'Medicine',hue:255,lectures:14,q:8420,pct:62,acc:78},
   {id:'surgery',name:'Surgery',hue:8,lectures:12,q:6310,pct:40,acc:71},
   {id:'pediatric',name:'Pediatric',hue:150,lectures:11,q:5240,pct:25,acc:69},
@@ -108,7 +135,7 @@ function lecturesFor(id){
   return Array.from({length:6}).map((_,i)=>({id:id+'-l'+i,name:subj.name+' — Lecture '+(i+1),q:120+i*40,pct:i<2?[70,45][i]:0,acc:i<2?[78,71][i]:0}));
 }
 
-function questions(){return[
+const FALLBACK_QUESTIONS = [
   {id:'c1',tag:'Cardiology',stem:'A 58-year-old man presents with crushing central chest pain radiating to the left arm for 2 hours. ECG shows ST-elevation in leads II, III and aVF. Which coronary artery is most likely occluded?',options:['Left anterior descending','Left circumflex','Right coronary artery','Left main stem','Diagonal branch'],answer:2,explanation:'ST-elevation in the inferior leads (II, III, aVF) indicates an inferior STEMI, most commonly caused by occlusion of the right coronary artery in a right-dominant circulation.'},
   {id:'c2',tag:'Cardiology',stem:'Which of the following is the single most appropriate immediate drug to give a patient with an acute ST-elevation myocardial infarction?',options:['Aspirin 300 mg','Warfarin','Furosemide','Digoxin','Amiodarone'],answer:0,explanation:'Immediate chewed aspirin 300 mg is given as soon as ACS is suspected; it reduces mortality through its antiplatelet effect and is the priority first drug.'},
   {id:'c3',tag:'Cardiology',stem:'A 72-year-old woman with atrial fibrillation has a CHA₂DS₂-VASc score of 3. What is the recommended long-term management to reduce stroke risk?',options:['No antithrombotic therapy','Aspirin alone','Oral anticoagulation','Clopidogrel alone','LMWH for one week only'],answer:2,explanation:'A CHA₂DS₂-VASc score of ≥2 warrants long-term oral anticoagulation (e.g. a DOAC or warfarin). Antiplatelet therapy is no longer recommended for stroke prevention in AF.'},
@@ -117,7 +144,22 @@ function questions(){return[
   {id:'c6',tag:'Cardiology',stem:'A 70-year-old man reports exertional syncope, angina and breathlessness. Examination reveals an ejection systolic murmur radiating to the carotids with a slow-rising pulse. The most likely diagnosis is:',options:['Mitral regurgitation','Aortic stenosis','Tricuspid regurgitation','Ventricular septal defect','Mitral valve prolapse'],answer:1,explanation:'The triad of syncope, angina and dyspnoea with an ejection systolic murmur radiating to the carotids and a slow-rising pulse is classic for severe aortic stenosis.'},
   {id:'c7',tag:'Cardiology',stem:'Which class of drug is first-line for symptom control in chronic stable angina?',options:['Beta-blocker','Warfarin','Digoxin','Furosemide','Spironolactone'],answer:0,explanation:'Beta-blockers (or rate-limiting calcium-channel blockers if beta-blockers are contraindicated) are first-line anti-anginal therapy for symptom control.'},
   {id:'c8',tag:'Cardiology',stem:'Which ECG finding is the earliest and most characteristic feature of hyperkalaemia?',options:['U waves','Tall, tented T waves','ST depression','Prolonged QT interval','Delta wave'],answer:1,explanation:'Tall, peaked (tented) T waves are the earliest characteristic ECG change of hyperkalaemia, later followed by widened QRS and loss of P waves.'},
-];}
+];
+
+function questions(){
+  // DB questions take priority; map DB row shape → app shape
+  if(S.dbQuestions.length){
+    return S.dbQuestions.map(q=>({
+      id: q.id,
+      tag: q.tag || q.lecture_id,
+      stem: q.stem,
+      options:[q.option_a,q.option_b,q.option_c,q.option_d,q.option_e],
+      answer: q.answer,
+      explanation: q.explanation||'',
+    }));
+  }
+  return FALLBACK_QUESTIONS;
+}
 
 /* ── helpers ── */
 function fmt(n){return (''+n).replace(/\B(?=(\d{3})+(?!\d))/g,',');}
@@ -143,9 +185,23 @@ window.Q={
   openSubject(id){setState({subjectId:id,screen:'lectures'});},
   openLecture(id,name){setState({lectureId:id,lectureName:name,screen:'modeselect'});},
   onBackToLectures(){setState({screen:'lectures'});},
-  onLogin(){setState({screen:'dashboard',role:'user'});},
-  onGuest(){setState({screen:'dashboard',role:'guest',answers:{},flags:{},qPos:0});},
-  onLogout(){setState({screen:'login',role:'user',answers:{},flags:{},qPos:0});},
+  async onLogin(){
+    const usernameEl = document.getElementById('login-username');
+    const passwordEl = document.getElementById('login-password');
+    const username   = usernameEl ? usernameEl.value.trim() : 'ahmed.r';
+    const password   = passwordEl ? passwordEl.value : '123456789';
+    if(!username || !password){ setState({authError:'Enter username and password.'}); return; }
+    setState({authError:''});
+    const email = username + '@squareqbank.local';
+    const {data, error} = await sb.auth.signInWithPassword({email, password});
+    if(error){ setState({authError:'Invalid username or password.'}); return; }
+    await DB.afterLogin(data.user);
+  },
+  onGuest(){setState({screen:'dashboard',role:'guest',profile:null,answers:{},flags:{},qPos:0,authError:''});},
+  async onLogout(){
+    if(S.role!=='guest') await sb.auth.signOut();
+    setState({screen:'login',role:'user',profile:null,answers:{},flags:{},qPos:0,activeSessionId:null,authError:'',dbQuestions:[],dbUsers:[]});
+  },
   onToggleTheme(){setState({theme:S.theme==='light'?'dark':'light'});},
   onResume(){
     const qs=questions();
@@ -174,17 +230,22 @@ window.Q={
     setState({flags,answers,mode:'study',queue:fl.length?fl:qs.map((_,i)=>i),qPos:0,
       sessionSubject:'Review',sessionLecture:'Flagged questions',screen:'solver'});
   },
-  startSession(mode){
+  async startSession(mode){
+    // load lecture questions from DB if authenticated
+    if(S.profile) await DB.loadQuestions(S.lectureId);
     const qs=questions();
     const subj=subjectsData().find(s=>s.id===S.subjectId);
-    setState({mode,queue:qs.map((_,i)=>i),qPos:0,answers:{},flags:{},examLeft:1500,
-      sessionSubject:subj?subj.name:'Medicine',sessionLecture:S.lectureName,screen:'solver'});
+    const subjName=subj?subj.name:'Medicine';
+    const sessionId=await DB.startSession(mode, S.lectureName, S.lectureId, S.subjectId, qs.length);
+    setState({mode,queue:qs.map((_,i)=>i),qPos:0,answers:{},examLeft:1500,
+      sessionSubject:subjName,sessionLecture:S.lectureName,
+      activeSessionId:sessionId,screen:'solver'});
   },
   onStartStudy(){Q.startSession('study');},
   onStartExam(){Q.startSession('exam');},
   onRetry(){Q.startSession('study');},
   onExitSolver(){setState({screen:S.subjectId?'lectures':'dashboard'});},
-  onFinish(){setState({screen:'results'});},
+  onFinish(){DB.completeSession();setState({screen:'results'});},
   choose(i){
     const q=curQ();const a={...S.answers};
     if(S.mode==='study'&&a[q.id]!==undefined)return;
@@ -193,7 +254,7 @@ window.Q={
   next(){setState(s=>({qPos:Math.min(s.queue.length-1,s.qPos+1)}));},
   prev(){setState(s=>({qPos:Math.max(0,s.qPos-1)}));},
   setQPos(i){setState({qPos:i});},
-  onFlag(){const q=curQ();const f={...S.flags};f[q.id]=!f[q.id];setState({flags:f});},
+  onFlag(){const q=curQ();const f={...S.flags};f[q.id]=!f[q.id];setState({flags:f});DB.toggleFlag(q.id);},
   setAdminTab(k){setState({adminTab:k});},
   onImport(){
     if(S.importing||S.importDone)return;
@@ -206,6 +267,142 @@ window.Q={
     },170);
   },
 };
+
+/* ── DB layer ── */
+const DB = {
+
+  async afterLogin(user){
+    // load profile
+    const {data:prof} = await sb.from('profiles').select('*').eq('id', user.id).single();
+    if(!prof){ setState({authError:'Profile not found. Contact administrator.'}); await sb.auth.signOut(); return; }
+    if(!prof.is_active){ setState({authError:'Account is deactivated. Contact administrator.'}); await sb.auth.signOut(); return; }
+
+    // device lock check
+    const fp = getDeviceFP();
+    const {data:devRes} = await sb.rpc('lock_device', {p_fp: fp});
+    if(devRes?.status === 'locked'){
+      await sb.auth.signOut();
+      setState({authError:'This account is locked to another device. Contact your administrator to reset.'}); return;
+    }
+
+    // load data
+    await DB.loadSubjectsAndLectures();
+    await DB.loadQuestions();
+    if(prof.role === 'admin') await DB.loadUsers();
+    await DB.loadFlags(user.id);
+
+    setState({
+      profile: prof,
+      role: prof.role === 'admin' ? 'admin' : 'user',
+      screen: 'dashboard',
+      answers:{}, flags: S.flags, qPos:0, authError:'',
+    });
+  },
+
+  async loadSubjectsAndLectures(){
+    const {data:subjects} = await sb.from('subjects').select('*').order('sort_order');
+    const {data:lectures} = await sb.from('lectures').select('*').order('sort_order');
+    setState({dbSubjects: subjects||[], dbLectures: lectures||[]});
+  },
+
+  async loadQuestions(lectureId){
+    let q = sb.from('questions').select('*').eq('is_active', true);
+    if(lectureId) q = q.eq('lecture_id', lectureId);
+    const {data} = await q.order('created_at');
+    setState({dbQuestions: data||[]});
+  },
+
+  async loadFlags(userId){
+    const {data} = await sb.from('question_flags').select('question_id').eq('user_id', userId);
+    const flags = {};
+    (data||[]).forEach(r=>{ flags[r.question_id]=true; });
+    setState({flags});
+  },
+
+  async toggleFlag(questionId){
+    if(!S.profile) return; // guest: local only
+    const flagged = S.flags[questionId];
+    if(flagged){
+      await sb.from('question_flags').delete().match({user_id:S.profile.id, question_id:questionId});
+    } else {
+      await sb.from('question_flags').upsert({user_id:S.profile.id, question_id:questionId});
+    }
+  },
+
+  async startSession(mode, label, lectureId, subjectId, totalQ){
+    if(!S.profile) return null;
+    const {data} = await sb.from('sessions').insert({
+      user_id: S.profile.id,
+      subject_id: subjectId||S.subjectId,
+      lecture_id: lectureId||S.lectureId,
+      mode, label, status:'active', total_questions: totalQ,
+    }).select().single();
+    return data?.id || null;
+  },
+
+  async saveAnswer(questionId, selected, isCorrect){
+    if(!S.activeSessionId || !S.profile) return;
+    await sb.from('session_answers').insert({
+      session_id: S.activeSessionId,
+      question_id: questionId,
+      selected, is_correct: isCorrect,
+    });
+    // update session counts
+    await sb.from('sessions').update({
+      answered: Object.keys(S.answers).length,
+      correct: Object.values(S.answers).filter((a,i)=>{
+        const q=questions()[S.queue[i]]; return q&&a===q.answer;
+      }).length,
+    }).eq('id', S.activeSessionId);
+  },
+
+  async completeSession(){
+    if(!S.activeSessionId) return;
+    const qs=questions(); let correct=0,answered=0;
+    qs.forEach(q=>{const a=S.answers[q.id];if(a!==undefined){answered++;if(a===q.answer)correct++;}});
+    await sb.from('sessions').update({
+      status:'completed', completed_at: new Date().toISOString(),
+      answered, correct,
+    }).eq('id', S.activeSessionId);
+    setState({activeSessionId:null});
+  },
+
+  async loadUsers(){
+    const {data} = await sb.from('profiles').select('*').eq('role','student').order('full_name');
+    setState({dbUsers: data||[]});
+  },
+
+  async createStudent(username, fullName, password){
+    const {data, error} = await sb.rpc('admin_create_student',{
+      p_username: username, p_full_name: fullName, p_password: password,
+    });
+    if(error) return {error: error.message};
+    await DB.loadUsers();
+    return {id: data};
+  },
+
+  async resetDevice(userId){
+    const {error} = await sb.rpc('admin_reset_device',{p_user_id: userId});
+    if(!error) await DB.loadUsers();
+    return !error;
+  },
+};
+
+/* ── boot: restore session ── */
+sb.auth.onAuthStateChange(async (event, session) => {
+  if(event === 'SIGNED_IN' && session && S.screen === 'login'){
+    await DB.afterLogin(session.user);
+  }
+});
+
+(async()=>{
+  const {data:{session}} = await sb.auth.getSession();
+  if(session){
+    await DB.afterLogin(session.user);
+  } else {
+    render(); // show login
+  }
+})();
 
 /* ── timer ── */
 function startTimer(){
@@ -269,14 +466,15 @@ function renderLogin(){
         <label style="display:block;font-weight:600;font-size:13px;color:var(--text);margin-bottom:7px">Username</label>
         <div style="display:flex;align-items:center;gap:10px;height:48px;padding:0 14px;border:1.5px solid var(--border);border-radius:11px;background:var(--surface2);margin-bottom:16px">
           <span class="ms" style="font-size:20px;color:var(--faint)">person</span>
-          <input value="ahmed.r" style="border:none;background:transparent;outline:none;font-weight:500;font-size:15px;color:var(--text);flex:1;font-family:Figtree">
+          <input id="login-username" placeholder="your username" style="border:none;background:transparent;outline:none;font-weight:500;font-size:15px;color:var(--text);flex:1;font-family:Figtree" onkeydown="if(event.key==='Enter')Q.onLogin()">
         </div>
         <label style="display:block;font-weight:600;font-size:13px;color:var(--text);margin-bottom:7px">Password</label>
         <div style="display:flex;align-items:center;gap:10px;height:48px;padding:0 14px;border:1.5px solid var(--border);border-radius:11px;background:var(--surface2);margin-bottom:16px">
           <span class="ms" style="font-size:20px;color:var(--faint)">lock</span>
-          <input type="password" value="123456789" style="border:none;background:transparent;outline:none;font-weight:500;font-size:15px;color:var(--text);flex:1;font-family:Figtree">
-          <span class="ms" style="font-size:20px;color:var(--faint);cursor:pointer">visibility_off</span>
+          <input id="login-password" type="password" placeholder="••••••••" style="border:none;background:transparent;outline:none;font-weight:500;font-size:15px;color:var(--text);flex:1;font-family:Figtree" onkeydown="if(event.key==='Enter')Q.onLogin()">
+          <span class="ms" style="font-size:20px;color:var(--faint);cursor:pointer" onclick="const i=document.getElementById('login-password');i.type=i.type==='password'?'text':'password'">visibility_off</span>
         </div>
+        ${S.authError?`<div style="display:flex;align-items:center;gap:9px;padding:11px 13px;border-radius:10px;background:var(--red-soft);margin-bottom:14px"><span class="ms" style="font-size:18px;color:var(--red)">error</span><span style="font-weight:500;font-size:12.5px;color:var(--red)">${esc(S.authError)}</span></div>`:''}
         <div style="display:flex;align-items:center;gap:9px;padding:11px 13px;border-radius:10px;background:var(--blue-soft);margin-bottom:22px">
           <span class="ms" style="font-size:18px;color:var(--blue)">verified_user</span>
           <span style="font-weight:500;font-size:12.5px;color:var(--blue-ink)">This device is registered. One account · one device.</span>
@@ -762,11 +960,17 @@ function renderApp(){
               <div style="min-width:0;flex:1"><div style="font-weight:700;font-size:13px;color:var(--text)">Guest</div><div style="font-weight:500;font-size:11px;color:var(--faint)">Progress not saved</div></div>
               <span onclick="Q.onLogout()" class="ms" style="font-size:20px;color:var(--faint);cursor:pointer" title="Sign in">login</span>
             </div>`
-          : `<div style="display:flex;align-items:center;gap:11px;padding:10px 12px;margin-top:4px;border-radius:10px">
-              <div style="width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--blue),var(--yellow));display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px;color:#fff">A</div>
-              <div style="min-width:0;flex:1"><div style="font-weight:700;font-size:13.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Ahmed Al-Rashid</div><div style="font-weight:500;font-size:11.5px;color:var(--muted)">5th stage · ahmed.r</div></div>
-              <span onclick="Q.onLogout()" class="ms" style="font-size:20px;color:var(--faint);cursor:pointer">logout</span>
-            </div>`}
+          : (()=>{
+              const p=S.profile;
+              const displayName=p?p.full_name||p.username:'Ahmed Al-Rashid';
+              const initial=(displayName[0]||'A').toUpperCase();
+              const sub=p?`${p.stage}th stage · ${p.username}`:'5th stage · ahmed.r';
+              return `<div style="display:flex;align-items:center;gap:11px;padding:10px 12px;margin-top:4px;border-radius:10px">
+                <div style="width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--blue),var(--yellow));display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px;color:#fff">${esc(initial)}</div>
+                <div style="min-width:0;flex:1"><div style="font-weight:700;font-size:13.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(displayName)}</div><div style="font-weight:500;font-size:11.5px;color:var(--muted)">${esc(sub)}</div></div>
+                <span onclick="Q.onLogout()" class="ms" style="font-size:20px;color:var(--faint);cursor:pointer">logout</span>
+              </div>`;
+            })()}
       </div>
     </aside>
 
@@ -812,7 +1016,6 @@ function render(){
 }
 
 startTimer();
-render();
 </script>
 </body>
 </html>

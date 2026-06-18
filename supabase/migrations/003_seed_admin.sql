@@ -1,0 +1,18 @@
+-- ============================================================
+-- Square QBank — Seed Admin Account
+-- Run this AFTER creating an admin user via Supabase Auth dashboard.
+-- Replace the UUID below with the actual user ID from auth.users.
+-- ============================================================
+
+-- Example: after creating admin@squareqbank.local in Auth dashboard,
+-- run this to promote them to admin role:
+--
+--   update public.profiles
+--   set role = 'admin', username = 'admin', full_name = 'Administrator'
+--   where id = '<paste-user-id-here>';
+--
+-- Or insert directly if the trigger didn't fire:
+--
+--   insert into public.profiles (id, username, full_name, role)
+--   values ('<user-id>', 'admin', 'Administrator', 'admin')
+--   on conflict (id) do update set role = 'admin';
