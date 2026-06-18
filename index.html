@@ -105,36 +105,35 @@ function subjectsData(){
   if(S.dbSubjects.length){
     return S.dbSubjects.map(s=>{
       const lecs=S.dbLectures.filter(l=>l.subject_id===s.id);
-      return {id:s.id,name:s.name,hue:s.hue,lectures:lecs.length||1,q:0,pct:0,acc:0};
+      return {id:s.id,name:s.name,hue:s.hue,category:s.category||s.name,lectures:lecs.length||0,q:0,pct:0,acc:0};
     });
   }
-  return[
-  {id:'medicine',name:'Medicine',hue:255,lectures:14,q:8420,pct:62,acc:78},
-  {id:'surgery',name:'Surgery',hue:8,lectures:12,q:6310,pct:40,acc:71},
-  {id:'pediatric',name:'Pediatric',hue:150,lectures:11,q:5240,pct:25,acc:69},
-  {id:'gynae',name:'Gynaecology',hue:330,lectures:10,q:4870,pct:55,acc:74},
-  {id:'ortho',name:'Orthopedic',hue:48,lectures:9,q:3960,pct:18,acc:66},
-  {id:'ent',name:'ENT',hue:200,lectures:7,q:2480,pct:80,acc:82},
-  {id:'ophtha',name:'Ophthalmology',hue:288,lectures:7,q:2210,pct:12,acc:0},
-  {id:'psych',name:'Psychiatry',hue:120,lectures:8,q:2980,pct:33,acc:70},
-  {id:'derma',name:'Dermatology',hue:25,lectures:6,q:1840,pct:0,acc:0},
-  {id:'ethics',name:'Medical Ethics',hue:235,lectures:5,q:920,pct:90,acc:88},
-];}
+  return[];
+}
+
+function subjectsByCategory(){
+  const all=subjectsData();
+  const order=['Medicine','Surgery','ENT','Ophthalmology','Orthopedics','Gynaecology','Psychiatry','Pediatric','Dermatology','Medical Ethics'];
+  const map={};
+  all.forEach(s=>{
+    const cat=s.category||s.name;
+    if(!map[cat]) map[cat]=[];
+    map[cat].push(s);
+  });
+  const result=[];
+  order.forEach(cat=>{if(map[cat]) result.push({cat,subjects:map[cat]});});
+  Object.keys(map).forEach(cat=>{if(!order.includes(cat)) result.push({cat,subjects:map[cat]});});
+  return result;
+}
 
 function lecturesFor(id){
-  if(id==='medicine') return[
-    {id:'cardio',name:'Cardiology',q:320,pct:75,acc:80},
-    {id:'resp',name:'Respiratory',q:280,pct:60,acc:74},
-    {id:'git',name:'Gastroenterology',q:340,pct:45,acc:71},
-    {id:'endo',name:'Endocrinology',q:260,pct:30,acc:68},
-    {id:'nephro',name:'Nephrology',q:210,pct:20,acc:0},
-    {id:'rheum',name:'Rheumatology',q:180,pct:0,acc:0},
-    {id:'heme',name:'Haematology',q:190,pct:0,acc:0},
-    {id:'id',name:'Infectious Diseases',q:230,pct:88,acc:83},
-    {id:'neuro',name:'Neurology',q:300,pct:15,acc:64},
-  ];
-  const subj=subjectsData().find(s=>s.id===id)||{name:'Subject'};
-  return Array.from({length:6}).map((_,i)=>({id:id+'-l'+i,name:subj.name+' — Lecture '+(i+1),q:120+i*40,pct:i<2?[70,45][i]:0,acc:i<2?[78,71][i]:0}));
+  if(S.dbLectures.length){
+    return S.dbLectures
+      .filter(l=>l.subject_id===id)
+      .sort((a,b)=>a.sort_order-b.sort_order)
+      .map(l=>({id:l.id,name:l.name,q:0,pct:0,acc:0}));
+  }
+  return [];
 }
 
 const FALLBACK_QUESTIONS = [
@@ -635,7 +634,7 @@ function renderApp(){
   }).join('');
 
   const subjects=subjectsData().map(s=>{const t=tile(s.hue);return{...s,initial:s.name[0],qLabel:fmt(s.q),tileBg:t.bg,tileFg:t.fg,accLabel:s.acc?(s.acc+'% accuracy'):'Not started'};});
-  const subj=subjects.find(s=>s.id===S.subjectId)||subjects[0];
+  const subj=subjects.find(s=>s.id===S.subjectId)||(subjects[0]||{id:'',name:'',initial:'?',tileBg:'var(--surface3)',tileFg:'var(--muted)',qLabel:'0',lectures:0,pct:0,acc:0,accLabel:'Not started'});
   const lectures=lecturesFor(S.subjectId).map((l,i)=>({...l,num:String(i+1).padStart(2,'0'),status:l.pct?(l.pct+'% complete'):'Not started',barColor:l.pct>=70?'var(--green)':(l.pct>=30?'var(--blue)':'var(--yellow)')}));
   const lec=lecturesFor(S.subjectId).find(l=>l.id===S.lectureId)||{name:S.lectureName,q:320};
 
@@ -707,7 +706,7 @@ function renderApp(){
         </button>
       </div>
 
-      <div style="display:flex;align-items:center;justify-content:space-between;margin:4px 2px 14px"><div style="font-weight:700;font-size:15px;color:var(--text)">Your subjects</div><button onclick="Q.goSubjects()" style="font-weight:600;font-size:13.5px;color:var(--blue);background:none;border:none;cursor:pointer">View all 10 →</button></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:4px 2px 14px"><div style="font-weight:700;font-size:15px;color:var(--text)">Your subjects</div><button onclick="Q.goSubjects()" style="font-weight:600;font-size:13.5px;color:var(--blue);background:none;border:none;cursor:pointer">View all ${subjects.length} →</button></div>
       <div class="grid-2" style="display:grid;grid-template-columns:repeat(2,1fr);gap:16px">
         ${topSubjects.map(s=>`<button onclick="Q.openSubject('${s.id}')" style="display:flex;align-items:center;gap:16px;text-align:left;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:18px 20px;cursor:pointer;box-shadow:var(--shadow)">
           <div style="width:46px;height:46px;border-radius:12px;flex:none;background:${s.tileBg};color:${s.tileFg};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:18px">${s.initial}</div>
@@ -723,20 +722,31 @@ function renderApp(){
   }
 
   else if(scr==='subjects'){
+    const groups=subjectsByCategory();
+    const catColors={'Medicine':'var(--blue)','Surgery':'var(--red)','ENT':'var(--green)','Ophthalmology':'#9b59b6','Orthopedics':'var(--yellow-ink)','Gynaecology':'#e91e8c','Psychiatry':'var(--green)','Pediatric':'#16a3a3','Dermatology':'var(--yellow-ink)','Medical Ethics':'var(--blue)'};
     pageHTML=`
-    <div style="max-width:1080px;margin:0 auto;animation:fadeUp .35s ease both">
-      <div class="grid-3" style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px">
-        ${subjects.map(s=>`<button onclick="Q.openSubject('${s.id}')" style="text-align:left;background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:22px;cursor:pointer;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:16px">
-          <div style="display:flex;align-items:center;gap:14px">
-            <div style="width:52px;height:52px;border-radius:14px;flex:none;background:${s.tileBg};color:${s.tileFg};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:20px">${s.initial}</div>
-            <div style="flex:1;min-width:0"><div style="font-weight:700;font-size:17px;color:var(--text)">${esc(s.name)}</div><div style="font-weight:500;font-size:12.5px;color:var(--muted)">${s.qLabel} MCQs · ${s.lectures} lectures</div></div>
+    <div style="max-width:1080px;margin:0 auto;animation:fadeUp .35s ease both;display:flex;flex-direction:column;gap:28px">
+      ${groups.map(({cat,subjects:gs})=>{
+        const catColor=catColors[cat]||'var(--blue)';
+        const enriched=gs.map(s=>{const t=tile(s.hue);return{...s,initial:s.name[0],tileBg:t.bg,tileFg:t.fg,accLabel:s.acc?(s.acc+'% accuracy'):'Not started'};});
+        return `<div>
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+            <div style="width:4px;height:20px;border-radius:2px;background:${catColor};flex:none"></div>
+            <span style="font-weight:800;font-size:17px;color:var(--text)">${esc(cat)}</span>
+            <span style="font-weight:500;font-size:13px;color:var(--faint)">${enriched.length} ${enriched.length===1?'specialty':'specialties'}</span>
           </div>
-          <div>
-            <div style="display:flex;justify-content:space-between;font-weight:600;font-size:12px;color:var(--muted);margin-bottom:6px"><span>${s.pct}% complete</span><span>${s.accLabel}</span></div>
-            <div style="height:7px;border-radius:7px;background:var(--surface3);overflow:hidden"><div style="height:100%;width:${s.pct}%;background:${s.tileFg}"></div></div>
+          <div class="grid-3" style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px">
+            ${enriched.map(s=>`<button onclick="Q.openSubject('${s.id}')" style="text-align:left;background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:18px 20px;cursor:pointer;box-shadow:var(--shadow);display:flex;align-items:center;gap:14px">
+              <div style="width:46px;height:46px;border-radius:12px;flex:none;background:${s.tileBg};color:${s.tileFg};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:18px">${s.initial}</div>
+              <div style="flex:1;min-width:0">
+                <div style="font-weight:700;font-size:15px;color:var(--text);margin-bottom:2px">${esc(s.name)}</div>
+                <div style="font-weight:500;font-size:12px;color:var(--muted)">${s.lectures} lectures</div>
+              </div>
+              <span class="ms" style="font-size:20px;color:var(--faint);flex:none">chevron_right</span>
+            </button>`).join('')}
           </div>
-        </button>`).join('')}
-      </div>
+        </div>`;
+      }).join('')}
     </div>`;
   }
 
