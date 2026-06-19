@@ -1,0 +1,8 @@
+# Claude Code local settings (machine-specific)
+.claude/settings.local.json
+
+# Vercel
+.vercel
+
+# Scratch / debug
+_check.js

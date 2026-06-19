@@ -148,7 +148,11 @@ function questions(){
     id: q.id,
     tag: q.tag || q.lecture_id,
     stem: q.stem,
-    options:[q.option_a,q.option_b,q.option_c,q.option_d,q.option_e],
+    image: q.image_url||'',
+    // keep only the options that were actually filled in (True/False
+    // questions store just A & B; the trailing C–E are left empty).
+    options:[q.option_a,q.option_b,q.option_c,q.option_d,q.option_e]
+      .filter(o=>o!=null && (''+o).trim()!==''),
     answer: q.answer,
     explanation: q.explanation||'',
   }));
@@ -638,7 +642,7 @@ function renderSolver(){
         <span class="ms" style="font-size:20px;color:var(--green);font-variation-settings:'FILL' 1">lightbulb</span>
         <span style="font-weight:700;font-size:14px;color:var(--text)">Explanation</span>
         <div style="flex:1"></div>
-        <span style="font-weight:600;font-size:12.5px;color:var(--green);padding:4px 10px;border-radius:20px;background:var(--green-soft)">Answer: ${'ABCDE'[q.answer]}</span>
+        <span style="font-weight:600;font-size:12.5px;color:var(--green);padding:4px 10px;border-radius:20px;background:var(--green-soft)">Answer: ${q.options.length<=2?esc(q.options[q.answer]):'ABCDE'[q.answer]}</span>
       </div>
       <p style="font-weight:400;font-size:15.5px;line-height:1.7;color:var(--muted);margin:0;padding:16px 18px">${esc(q.explanation)}</p>
     </div>`:'';
@@ -666,7 +670,8 @@ function renderSolver(){
           <span style="font-weight:700;font-size:12px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted)">${esc(q.tag)}</span>
           <button onclick="Q.onFlag()" style="display:flex;align-items:center;gap:7px;height:36px;padding:0 14px;border:1.5px solid ${flagged?'var(--yellow)':'var(--border)'};border-radius:10px;background:${flagged?'var(--yellow-soft)':'var(--surface)'};color:${flagged?'var(--yellow-ink)':'var(--muted)'};font-weight:600;font-size:13.5px;cursor:pointer"><span class="ms" style="font-size:18px;font-variation-settings:'FILL' ${flagged?1:0}">flag</span>${flagged?'Flagged':'Flag'}</button>
         </div>
-        <h2 style="font-weight:600;font-size:23px;line-height:1.45;color:var(--text);letter-spacing:-.3px;margin:0 0 24px">${esc(q.stem)}</h2>
+        <h2 style="font-weight:600;font-size:23px;line-height:1.45;color:var(--text);letter-spacing:-.3px;margin:0 0 ${q.image?'18px':'24px'}">${esc(q.stem)}</h2>
+        ${q.image?`<img src="${esc(q.image)}" alt="Question image" style="display:block;width:100%;max-width:480px;height:auto;border-radius:14px;border:1px solid var(--border);margin:0 0 24px"/>`:''}
         ${choicesHTML}
         ${explanationHTML}
       </div>

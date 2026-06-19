@@ -1,0 +1,28 @@
+-- ============================================================
+-- Square QBank - Seed: Medical Ethics, Lecture 5 (Models of Physician-Patient Relationship)
+-- 16 True/False questions.
+-- ============================================================
+
+alter table public.questions add column if not exists image_url text;
+
+delete from public.questions where lecture_id = 'et-05';
+
+insert into public.questions
+  (subject_id, lecture_id, tag, stem, option_a, option_b, option_c, option_d, option_e, answer, explanation, image_url)
+values
+  ('ethics', 'et-05', 'Models of Physician-Patient Relationship', 'A doctor presents all treatment options objectively, avoids giving a recommendation, and asks the patient to choose independently. The role exercised by the physician is the deliberative model.', 'True', 'False', '', '', '', 1, 'This is the informative model - the doctor acts as a technical expert giving full disclosure of facts with no persuasion, and the patient chooses independently.', null),
+  ('ethics', 'et-05', 'Models of Physician-Patient Relationship', 'A physician insists on immediate surgery for a competent patient, states it is the only reasonable option, and does not discuss alternatives. This best describes the paternalistic model.', 'True', 'False', '', '', '', 0, 'In the paternalistic model the doctor ''knows best'' and decides what is best for the patient; the patient plays a passive role, with limited disclosure.', null),
+  ('ethics', 'et-05', 'Models of Physician-Patient Relationship', 'Continuing futile treatment in the ICU because the family demands it is an example of abandonment.', 'True', 'False', '', '', '', 1, 'This is moral distress - the physician knows the ethically right action but institutional constraints prevent it.', null),
+  ('ethics', 'et-05', 'Models of Physician-Patient Relationship', 'When a physician withdraws care without a referral or continuity, it is an example of abandonment.', 'True', 'False', '', '', '', 0, 'Withdrawing care without arranging continuity or referral constitutes abandonment.', null),
+  ('ethics', 'et-05', 'Models of Physician-Patient Relationship', 'A physician orders unnecessary investigations or treatment to avoid legal problems. This behavior is driven by beneficence.', 'True', 'False', '', '', '', 1, 'This is defensive medicine, driven by fear of litigation.', null),
+  ('ethics', 'et-05', 'Models of Physician-Patient Relationship', 'In the consumerism model, the patient makes decisions independently and the physician acts mainly as a technical provider of information.', 'True', 'False', '', '', '', 0, 'This correctly describes the consumerism model.', null),
+  ('ethics', 'et-05', 'Models of Physician-Patient Relationship', 'Shared decision-making, where the physician provides medical expertise and the patient provides values and preferences, is the gold standard in clinical practice.', 'True', 'False', '', '', '', 0, 'Shared decision-making is the gold standard in clinical practice.', null),
+  ('ethics', 'et-05', 'Models of Physician-Patient Relationship', 'The paternalistic model is never acceptable.', 'True', 'False', '', '', '', 1, 'It is acceptable in limited situations: the patient lacks mental capacity, emergencies, public-health threats, no time for informed consent, or interventions that prevent significant harm.', null),
+  ('ethics', 'et-05', 'Models of Physician-Patient Relationship', 'In the paternalistic model, the main ethical principle upheld is autonomy.', 'True', 'False', '', '', '', 1, 'The paternalistic model overrides autonomy and informed consent in favor of beneficence.', null),
+  ('ethics', 'et-05', 'Models of Physician-Patient Relationship', 'Soft paternalism is never ethically acceptable.', 'True', 'False', '', '', '', 1, 'Soft paternalism occurs when the patient lacks decision-making capacity, and intervention is then justified.', null),
+  ('ethics', 'et-05', 'Models of Physician-Patient Relationship', 'Strong (hard) paternalism is ethically unacceptable.', 'True', 'False', '', '', '', 0, 'It occurs when the patient is competent but the physician overrides their decision.', null),
+  ('ethics', 'et-05', 'Models of Physician-Patient Relationship', 'Forcing chemotherapy on a competent patient who refuses it is an example of soft paternalism.', 'True', 'False', '', '', '', 1, 'This is strong (hard) paternalism, because the patient is competent.', null),
+  ('ethics', 'et-05', 'Models of Physician-Patient Relationship', 'Treating an unconscious trauma patient without consent is an example of soft paternalism.', 'True', 'False', '', '', '', 0, 'The patient lacks capacity, so intervention is justified (soft paternalism).', null),
+  ('ethics', 'et-05', 'Models of Physician-Patient Relationship', 'A doctor explains chemotherapy options but gives no recommendation. This is an example of the informative model.', 'True', 'False', '', '', '', 0, 'Correct - this is the informative model.', null),
+  ('ethics', 'et-05', 'Models of Physician-Patient Relationship', 'A doctor helps a patient clarify their values and acts as a counselor, asking what matters most - longevity or quality of life. This is an example of the deliberative model.', 'True', 'False', '', '', '', 1, 'This is the interpretive model, where the doctor acts as a counselor and is deeply patient-centered.', null),
+  ('ethics', 'et-05', 'Models of Physician-Patient Relationship', 'A doctor encourages smoking cessation by explaining why preserving health is important. This is an example of the deliberative model.', 'True', 'False', '', '', '', 0, 'Correct - the doctor acts as a teacher or moral advisor (deliberative model).', null);
