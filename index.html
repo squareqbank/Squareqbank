@@ -101,6 +101,10 @@ const S = {
   adminTab:'users',
   showCreateModal:false, createError:'', createLoading:false,
   showBulkModal:false, bulkText:'', bulkResults:[], bulkLoading:false,
+  dbAdminQuestions:[],           // admin: full question rows for management
+  adminQLecture:'', adminQSearch:'',
+  showQEdit:false, editQ:null, qSaveError:'', qSaving:false,
+  deleteQId:null, qDeleting:false,
 };
 
 let _timerInterval = null;
@@ -294,7 +298,55 @@ window.Q={
   prev(){setState(s=>({qPos:Math.max(0,s.qPos-1)}));},
   setQPos(i){setState({qPos:i});},
   onFlag(){const q=curQ();const f={...S.flags};f[q.id]=!f[q.id];setState({flags:f});DB.toggleFlag(q.id);},
-  setAdminTab(k){setState({adminTab:k});},
+  setAdminTab(k){setState({adminTab:k}); if(k==='questions') DB.loadAdminQuestions();},
+  setAdminQLecture(v){setState({adminQLecture:v});},
+  onAdminQSearch(v){setState({adminQSearch:v});},
+  openQEdit(id){const q=S.dbAdminQuestions.find(x=>x.id===id)||S.dbQuestions.find(x=>x.id===id); if(!q)return; setState({showQEdit:true,editQ:{...q},qSaveError:'',qSaving:false});},
+  closeQEdit(){setState({showQEdit:false,editQ:null,qSaveError:'',qSaving:false});},
+  async onSaveQuestion(){
+    const g=id=>document.getElementById(id);
+    const stem=(g('eq-stem')?.value||'').trim();
+    const opts=['a','b','c','d','e'].map(L=>g('eq-opt-'+L)?.value||'');
+    const answer=parseInt(g('eq-answer')?.value||'0');
+    const tag=(g('eq-tag')?.value||'').trim();
+    const explanation=(g('eq-expl')?.value||'').trim();
+    // keep what the admin typed so a validation error doesn't wipe edits on re-render
+    const draft={...S.editQ, stem, option_a:opts[0],option_b:opts[1],option_c:opts[2],option_d:opts[3],option_e:opts[4], answer, tag, explanation};
+    if(!stem){setState({editQ:draft,qSaveError:'Question stem cannot be empty.'});return;}
+    if(!opts[0].trim()||!opts[1].trim()){setState({editQ:draft,qSaveError:'Options A and B are required.'});return;}
+    if((opts[answer]||'').trim()===''){setState({editQ:draft,qSaveError:'The selected correct answer points to an empty option.'});return;}
+    setState({editQ:draft,qSaving:true,qSaveError:''});
+    const res=await DB.updateQuestion(S.editQ.id,{
+      stem, option_a:opts[0],option_b:opts[1],option_c:opts[2],option_d:opts[3],option_e:opts[4],
+      answer, tag:tag||null, explanation:explanation||null,
+    });
+    if(res.error){setState({qSaving:false,qSaveError:res.error});return;}
+    setState({showQEdit:false,editQ:null,qSaving:false,qSaveError:''});
+  },
+  askDeleteQuestion(id){setState({deleteQId:id,qDeleting:false});},
+  cancelDeleteQuestion(){setState({deleteQId:null,qDeleting:false});},
+  async confirmDeleteQuestion(){
+    const id=S.deleteQId; if(!id)return;
+    setState({qDeleting:true});
+    const res=await DB.deleteQuestion(id);
+    if(res.error){setState({qDeleting:false}); alert('Remove failed: '+res.error); return;}
+    // If deleting mid-session (from the solver/review screen), drop it from the live
+    // queue by identity so index-based navigation doesn't break.
+    if(S.screen==='solver' && S.dbQuestions.some(q=>q.id===id)){
+      const curId=(()=>{const cq=questions()[S.queue[S.qPos]];return cq?cq.id:null;})();
+      const orderedIds=S.queue.map(qi=>{const qq=questions()[qi];return qq?qq.id:null;});
+      const newDb=S.dbQuestions.filter(q=>q.id!==id);
+      if(!newDb.length){ setState({dbQuestions:[],queue:[],qPos:0,deleteQId:null,qDeleting:false,screen:'subjects'}); return; }
+      const posById={}; newDb.forEach((q,i)=>{ posById[q.id]=i; });
+      const newQueue=orderedIds.filter(qid=>qid&&qid!==id&&posById[qid]!==undefined).map(qid=>posById[qid]);
+      let newPos;
+      if(curId&&curId!==id&&posById[curId]!==undefined){ newPos=newQueue.indexOf(posById[curId]); }
+      else { newPos=Math.min(S.qPos,newQueue.length-1); }   // current was deleted → stay near same spot
+      setState({dbQuestions:newDb,queue:newQueue,qPos:Math.max(0,newPos),deleteQId:null,qDeleting:false});
+      return;
+    }
+    setState({deleteQId:null,qDeleting:false});
+  },
   openCreateModal(){setState({showCreateModal:true,createError:'',createLoading:false});},
   closeCreateModal(){setState({showCreateModal:false,createError:'',createLoading:false});},
   async onCreateStudent(){
@@ -396,6 +448,31 @@ const DB = {
   async loadQuestionCount(){
     const {count} = await sb.from('questions').select('id', {count:'exact', head:true}).eq('is_active', true);
     setState({dbQuestionCount: count||0});
+  },
+
+  async loadAdminQuestions(){
+    const {data} = await sb.from('questions').select('*').eq('is_active', true).order('created_at');
+    setState({dbAdminQuestions: data||[]});
+  },
+
+  async updateQuestion(id, fields){
+    const {error} = await sb.from('questions').update(fields).eq('id', id);
+    if(error) return {error: error.message};
+    // reflect the edit in any live session queue (solver/review) without a reload
+    const patched=S.dbQuestions.map(q=>q.id===id?{...q,...fields}:q);
+    setState({dbQuestions:patched});
+    await Promise.allSettled([DB.loadAdminQuestions(), DB.loadQuestionCount()]);
+    return {};
+  },
+
+  async deleteQuestion(id){
+    // Soft-delete: hide it from the bank and every practice set (all loaders
+    // filter is_active = true) while preserving students' past session_answers
+    // (a hard delete would break that foreign key).
+    const {error} = await sb.from('questions').update({is_active:false}).eq('id', id);
+    if(error) return {error: error.message};
+    await Promise.allSettled([DB.loadAdminQuestions(), DB.loadQuestionCount()]);
+    return {};
   },
 
   async loadFlags(userId){
@@ -596,12 +673,69 @@ function renderLogin(){
   </div>`;
 }
 
+// Admin question edit + delete modals — shared by the Admin tab and the solver/review screen.
+function renderQEditModals(){
+  if(!(S.showQEdit && S.editQ) && !S.deleteQId) return '';
+  const modalOverlay=`position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;display:flex;align-items:center;justify-content:center;padding:16px`;
+  const modalBox=`background:var(--surface);border-radius:20px;box-shadow:var(--shadow-lg);width:100%;max-width:460px;padding:28px;position:relative`;
+  const lblCss=`font-weight:600;font-size:12.5px;color:var(--muted);display:block;margin-bottom:5px`;
+  const inCss=`width:100%;height:42px;border:1.5px solid var(--border);border-radius:10px;padding:0 12px;font-size:14px;background:var(--surface2);color:var(--text);outline:none;font-family:Figtree`;
+  const taCss=`width:100%;border:1.5px solid var(--border);border-radius:10px;padding:10px 12px;font-size:14px;background:var(--surface2);color:var(--text);outline:none;resize:vertical;font-family:Figtree;line-height:1.6`;
+  const letters=['A','B','C','D','E'];
+
+  const eq=S.editQ;
+  const qEditModalHTML=(S.showQEdit&&eq)?`<div style="${modalOverlay}" onclick="if(event.target===this)Q.closeQEdit()">
+    <div style="${modalBox};max-width:600px;max-height:90vh;overflow-y:auto">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
+        <div style="font-weight:800;font-size:18px;color:var(--text)">Edit question</div>
+        <span class="ms" onclick="Q.closeQEdit()" style="font-size:22px;color:var(--faint);cursor:pointer">close</span>
+      </div>
+      ${S.qSaveError?`<div style="background:var(--red-soft);color:var(--red);border-radius:10px;padding:10px 14px;font-weight:600;font-size:13px;margin-bottom:14px">${esc(S.qSaveError)}</div>`:''}
+      <div style="display:flex;flex-direction:column;gap:13px">
+        <div><label style="${lblCss}">Question stem</label>
+          <textarea id="eq-stem" rows="3" style="${taCss}">${esc(eq.stem||'')}</textarea></div>
+        ${letters.map((L,i)=>`<div><label style="${lblCss}">Option ${L}${i>1?' <span style="color:var(--faint);font-weight:500">(optional)</span>':''}</label>
+          <input id="eq-opt-${L.toLowerCase()}" value="${esc(eq['option_'+L.toLowerCase()]||'')}" style="${inCss}"></div>`).join('')}
+        <div><label style="${lblCss}">Correct answer</label>
+          <select id="eq-answer" style="${inCss}">
+            ${letters.map((L,i)=>`<option value="${i}"${eq.answer===i?' selected':''}>Option ${L}</option>`).join('')}
+          </select></div>
+        <div><label style="${lblCss}">Subtopic / tag</label>
+          <input id="eq-tag" value="${esc(eq.tag||'')}" style="${inCss}"></div>
+        <div><label style="${lblCss}">Explanation</label>
+          <textarea id="eq-expl" rows="4" style="${taCss}">${esc(eq.explanation||'')}</textarea></div>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:20px">
+        <button onclick="Q.closeQEdit()" style="flex:1;height:46px;border:1.5px solid var(--border);border-radius:12px;background:var(--surface);color:var(--text);font-weight:700;font-size:14px;cursor:pointer">Cancel</button>
+        <button onclick="Q.onSaveQuestion()" style="flex:2;height:46px;border:none;border-radius:12px;background:var(--blue);color:#fff;font-weight:700;font-size:14px;cursor:pointer;opacity:${S.qSaving?.6:1}">${S.qSaving?'Saving…':'Save changes'}</button>
+      </div>
+    </div></div>`:'';
+
+  const dq=S.deleteQId?(S.dbAdminQuestions.find(x=>x.id===S.deleteQId)||S.dbQuestions.find(x=>x.id===S.deleteQId)):null;
+  const qDeleteModalHTML=dq?`<div style="${modalOverlay}" onclick="if(event.target===this)Q.cancelDeleteQuestion()">
+    <div style="${modalBox};max-width:420px">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
+        <div style="width:40px;height:40px;border-radius:11px;background:var(--red-soft);display:flex;align-items:center;justify-content:center;flex:none"><span class="ms" style="font-size:22px;color:var(--red)">delete</span></div>
+        <div style="font-weight:800;font-size:17px;color:var(--text)">Remove this question?</div>
+      </div>
+      <div style="font-weight:500;font-size:13.5px;color:var(--muted);line-height:1.6;margin-bottom:16px">It will be removed from the bank and every practice set. Students' past answers are kept.</div>
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;font-weight:500;font-size:13px;color:var(--text);margin-bottom:18px;line-height:1.5">${esc((dq.stem||'').slice(0,160))}${(dq.stem||'').length>160?'…':''}</div>
+      <div style="display:flex;gap:10px">
+        <button onclick="Q.cancelDeleteQuestion()" style="flex:1;height:46px;border:1.5px solid var(--border);border-radius:12px;background:var(--surface);color:var(--text);font-weight:700;font-size:14px;cursor:pointer">Cancel</button>
+        <button onclick="Q.confirmDeleteQuestion()" style="flex:1;height:46px;border:none;border-radius:12px;background:var(--red);color:#fff;font-weight:700;font-size:14px;cursor:pointer;opacity:${S.qDeleting?.6:1}">${S.qDeleting?'Removing…':'Remove'}</button>
+      </div>
+    </div></div>`:'';
+
+  return qEditModalHTML+qDeleteModalHTML;
+}
+
 function renderSolver(){
   const q=curQ();
   const ans=S.answers[q.id];
   const answered=ans!==undefined;
   const reveal=S.mode==='study'&&answered;
   const flagged=!!S.flags[q.id];
+  const isAdmin=!!(S.profile&&S.profile.role==='admin');
   const mm=String(Math.floor(S.examLeft/60)).padStart(2,'0');
   const ss2=String(S.examLeft%60).padStart(2,'0');
   const answeredInQueue=S.queue.filter(qi=>S.answers[questions()[qi].id]!==undefined).length;
@@ -650,6 +784,7 @@ function renderSolver(){
   const isLast=S.qPos===S.queue.length-1;
 
   return `
+  ${renderQEditModals()}
   <div style="min-height:100vh;display:flex;flex-direction:column;background:var(--bg)">
     <div class="app-header" style="height:60px;flex:none;display:flex;align-items:center;gap:14px;padding:0 20px;background:var(--surface);border-bottom:1px solid var(--border)">
       <button onclick="Q.onExitSolver()" style="display:flex;align-items:center;gap:6px;height:38px;padding:0 13px;border:1px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text);font-weight:600;font-size:14px;cursor:pointer"><span class="ms" style="font-size:19px">close</span><span class="rlabel">Exit</span></button>
@@ -666,9 +801,13 @@ function renderSolver(){
 
     <div style="flex:1;overflow:auto;display:flex;justify-content:center;padding:34px 20px 120px">
       <div style="width:100%;max-width:760px;animation:pop .22s ease both">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:16px">
           <span style="font-weight:700;font-size:12px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted)">${esc(q.tag)}</span>
-          <button onclick="Q.onFlag()" style="display:flex;align-items:center;gap:7px;height:36px;padding:0 14px;border:1.5px solid ${flagged?'var(--yellow)':'var(--border)'};border-radius:10px;background:${flagged?'var(--yellow-soft)':'var(--surface)'};color:${flagged?'var(--yellow-ink)':'var(--muted)'};font-weight:600;font-size:13.5px;cursor:pointer"><span class="ms" style="font-size:18px;font-variation-settings:'FILL' ${flagged?1:0}">flag</span>${flagged?'Flagged':'Flag'}</button>
+          <div style="display:flex;align-items:center;gap:8px">
+            ${isAdmin?`<button onclick="Q.openQEdit('${q.id}')" title="Edit this question" style="display:flex;align-items:center;gap:6px;height:36px;padding:0 13px;border:1.5px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text);font-weight:600;font-size:13.5px;cursor:pointer"><span class="ms" style="font-size:18px">edit</span><span class="rlabel">Edit</span></button>
+            <button onclick="Q.askDeleteQuestion('${q.id}')" title="Remove this question" style="display:flex;align-items:center;justify-content:center;width:36px;height:36px;border:1.5px solid var(--border);border-radius:10px;background:var(--surface);color:var(--red);cursor:pointer"><span class="ms" style="font-size:18px">delete</span></button>`:''}
+            <button onclick="Q.onFlag()" style="display:flex;align-items:center;gap:7px;height:36px;padding:0 14px;border:1.5px solid ${flagged?'var(--yellow)':'var(--border)'};border-radius:10px;background:${flagged?'var(--yellow-soft)':'var(--surface)'};color:${flagged?'var(--yellow-ink)':'var(--muted)'};font-weight:600;font-size:13.5px;cursor:pointer"><span class="ms" style="font-size:18px;font-variation-settings:'FILL' ${flagged?1:0}">flag</span>${flagged?'Flagged':'Flag'}</button>
+          </div>
         </div>
         <h2 style="font-weight:600;font-size:23px;line-height:1.45;color:var(--text);letter-spacing:-.3px;margin:0 0 ${q.image?'18px':'24px'}">${esc(q.stem)}</h2>
         ${q.image?`<img src="${esc(q.image)}" alt="Question image" style="display:block;width:100%;max-width:480px;height:auto;border-radius:14px;border:1px solid var(--border);margin:0 0 24px"/>`:''}
@@ -1022,6 +1161,9 @@ function renderApp(){
     // modals (rendered outside main flow, overlaid)
     const modalOverlay=`position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;display:flex;align-items:center;justify-content:center;padding:16px`;
     const modalBox=`background:var(--surface);border-radius:20px;box-shadow:var(--shadow-lg);width:100%;max-width:460px;padding:28px;position:relative`;
+    const lblCss=`font-weight:600;font-size:12.5px;color:var(--muted);display:block;margin-bottom:5px`;
+    const inCss=`width:100%;height:42px;border:1.5px solid var(--border);border-radius:10px;padding:0 12px;font-size:14px;background:var(--surface2);color:var(--text);outline:none;font-family:Figtree`;
+    const taCss=`width:100%;border:1.5px solid var(--border);border-radius:10px;padding:10px 12px;font-size:14px;background:var(--surface2);color:var(--text);outline:none;resize:vertical;font-family:Figtree;line-height:1.6`;
 
     const createModalHTML=S.showCreateModal?`<div style="${modalOverlay}" onclick="if(event.target===this)Q.closeCreateModal()">
       <div style="${modalBox}">
@@ -1101,16 +1243,51 @@ function renderApp(){
         </div></div>
       </div>`;
     } else {
-      tabContent=`<div style="background:var(--surface);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow);overflow:hidden">
-        <div style="display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid var(--border)">
+      const letters=['A','B','C','D','E'];
+      const lecName=id=>{const l=S.dbLectures.find(x=>x.id===id);return l?l.name:id;};
+      const subjName=id=>{const s=S.dbSubjects.find(x=>x.id===id);return s?s.name:'';};
+
+      let list=S.dbAdminQuestions.slice();
+      if(S.adminQLecture) list=list.filter(q=>q.lecture_id===S.adminQLecture);
+      const term=(S.adminQSearch||'').trim().toLowerCase();
+      if(term) list=list.filter(q=>((q.stem||'')+' '+(q.tag||'')).toLowerCase().includes(term));
+
+      const rows=list.length?list.map(q=>{
+        const optTexts=[q.option_a,q.option_b,q.option_c,q.option_d,q.option_e];
+        const ansText=optTexts[q.answer]||'';
+        return `<div style="display:grid;grid-template-columns:1fr auto;gap:14px;align-items:start;padding:14px 20px;border-bottom:1px solid var(--border2)">
+          <div style="min-width:0">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;flex-wrap:wrap">
+              <span style="font-weight:700;font-size:11px;color:var(--blue-ink);background:var(--blue-soft);border-radius:6px;padding:2px 8px">${esc(q.tag||lecName(q.lecture_id))}</span>
+              <span style="font-weight:600;font-size:11px;color:var(--muted)">${esc(subjName(q.subject_id))} · ${esc(lecName(q.lecture_id))}</span>
+            </div>
+            <div style="font-weight:600;font-size:13.5px;color:var(--text);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${esc(q.stem||'')}</div>
+            <div style="font-weight:600;font-size:12px;color:var(--green);margin-top:5px"><span class="ms" style="font-size:14px;vertical-align:-2px">check_circle</span> ${letters[q.answer]||'?'}. ${esc((''+ansText).slice(0,80))}</div>
+          </div>
+          <div style="display:flex;gap:8px;flex:none">
+            <button onclick="Q.openQEdit('${q.id}')" style="height:34px;padding:0 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font-weight:700;font-size:12.5px;cursor:pointer;display:flex;align-items:center;gap:5px"><span class="ms" style="font-size:16px">edit</span>Edit</button>
+            <button onclick="Q.askDeleteQuestion('${q.id}')" title="Remove question" style="height:34px;width:34px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--red);cursor:pointer;display:flex;align-items:center;justify-content:center"><span class="ms" style="font-size:17px">delete</span></button>
+          </div>
+        </div>`;
+      }).join(''):`<div style="padding:48px;text-align:center;color:var(--muted);font-weight:500;font-size:14px"><span class="ms" style="font-size:36px;display:block;margin-bottom:8px">quiz</span>${S.dbQuestionCount?'No questions match your filter.':'No questions in the bank yet.'}</div>`;
+
+      const lectureOptions=S.dbLectures.slice().sort((a,b)=>(a.sort_order||0)-(b.sort_order||0))
+        .map(l=>`<option value="${l.id}"${S.adminQLecture===l.id?' selected':''}>${esc(subjName(l.subject_id))} — ${esc(l.name)}</option>`).join('');
+
+      tabContent=`${renderQEditModals()}<div style="background:var(--surface);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow);overflow:hidden">
+        <div style="display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid var(--border);flex-wrap:wrap">
           <span style="font-weight:700;font-size:15px;color:var(--text)">Question bank</span>
-          <span style="font-weight:500;font-size:12.5px;color:var(--muted)">${fmt(S.dbQuestionCount)} total</span>
+          <span style="font-weight:500;font-size:12.5px;color:var(--muted)">${fmt(list.length)} shown · ${fmt(S.dbQuestionCount)} total</span>
+          <div style="flex:1"></div>
+          <select onchange="Q.setAdminQLecture(this.value)" style="height:38px;border:1.5px solid var(--border);border-radius:9px;padding:0 10px;font-size:13px;background:var(--surface2);color:var(--text);outline:none;max-width:240px;font-family:Figtree">
+            <option value="">All lectures</option>${lectureOptions}
+          </select>
+          <div style="display:flex;align-items:center;gap:7px;height:38px;padding:0 12px;border:1.5px solid var(--border);border-radius:9px;background:var(--surface2);width:220px;max-width:40vw">
+            <span class="ms" style="font-size:18px;color:var(--faint)">search</span>
+            <input value="${esc(S.adminQSearch||'')}" onchange="Q.onAdminQSearch(this.value)" placeholder="Search, then Enter…" style="border:none;background:transparent;outline:none;font-weight:500;font-size:13px;color:var(--text);flex:1;min-width:0;font-family:Figtree">
+          </div>
         </div>
-        <div style="padding:54px 30px;text-align:center">
-          <span class="ms" style="font-size:42px;color:var(--faint)">quiz</span>
-          <div style="font-weight:800;font-size:18px;color:var(--text);margin:12px 0 6px">${S.dbQuestionCount?(fmt(S.dbQuestionCount)+' questions in the bank'):'No questions yet'}</div>
-          <div style="font-weight:500;font-size:13.5px;color:var(--muted);max-width:480px;margin:0 auto;line-height:1.6">Question authoring and bulk MCQ upload are coming soon. The ${fmt(S.dbSubjects.length)} subjects and ${fmt(S.dbLectures.length)} lectures are already in place and ready for content.</div>
-        </div>
+        <div style="max-height:62vh;overflow-y:auto">${rows}</div>
       </div>`;
     }
 
