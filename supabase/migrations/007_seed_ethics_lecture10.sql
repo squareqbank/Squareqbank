@@ -32,3 +32,7 @@ values
   ('ethics', 'et-10', 'End-of-Life Ethics', 'Palliative care cannot be provided alongside curative treatment.', 'True', 'False', '', '', '', 1, 'Palliative care can be provided with or without curative treatment.', ''),
   ('ethics', 'et-10', 'End-of-Life Ethics', 'The goal of end-of-life care is to provide comfort, dignity, and quality of life.', 'True', 'False', '', '', '', 0, 'It applies to terminal illness, irreversible conditions, and advanced chronic disease.', ''),
   ('ethics', 'et-10', 'End-of-Life Ethics', 'Life-sustaining treatments include mechanical ventilation, CPR, dialysis, and artificial nutrition and hydration.', 'True', 'False', '', '', '', 0, 'All of these are examples of life-sustaining treatment.', '');
+
+-- added: double-effect question
+insert into public.questions (subject_id, lecture_id, tag, stem, option_a, option_b, option_c, option_d, option_e, answer, explanation, image_url) values
+  ('ethics', 'et-10', 'End-of-Life Ethics', 'The principle of double effect is intended to relieve suffering and to intentionally shorten life.', 'True', 'False', '', '', '', 1, 'The intention is only to relieve suffering; the treatment may unintentionally (not intentionally) shorten life.', null);
