@@ -600,6 +600,13 @@ function startTimer(){
 /* ── keyboard ── */
 document.addEventListener('keydown',e=>{
   if(S.screen!=='solver')return;
+  // Don't hijack keystrokes while a modal is open (e.g. editing a question) or
+  // while the user is typing into a form field — otherwise digits/arrows/"f"
+  // would answer, skip or flag the question behind the modal and the re-render
+  // would wipe everything typed into the edit form.
+  if(S.showQEdit||S.deleteQId)return;
+  const t=e.target;
+  if(t&&(t.isContentEditable||/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)))return;
   if(e.key>='1'&&e.key<='5'){Q.choose(+e.key-1);}
   else if(e.key==='ArrowRight'){Q.next();}
   else if(e.key==='ArrowLeft'){Q.prev();}
