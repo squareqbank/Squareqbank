@@ -81,6 +81,7 @@ function getDeviceFP(){
 /* ── state ── */
 const S = {
   theme:'light', screen:'login', role:'user',
+  stage:5,               // selected academic stage (5 or 6) — scopes the subject list
   profile:null,          // {id, username, full_name, role, stage}
   dbQuestions:[],        // questions loaded from Supabase
   dbSubjects:[],         // subjects loaded from Supabase
@@ -114,7 +115,9 @@ let _timerInterval = null;
 /* ── data ── */
 function subjectsData(){
   if(S.dbSubjects.length){
-    return S.dbSubjects.map(s=>{
+    // Student/guest browsing is scoped to the selected stage (subjects default
+    // to stage 5). The admin panel reads S.dbSubjects directly, so it is unaffected.
+    return S.dbSubjects.filter(s=>(s.stage||5)===S.stage).map(s=>{
       const lecs=S.dbLectures.filter(l=>l.subject_id===s.id);
       return {id:s.id,name:s.name,hue:s.hue,category:s.category||s.name,lectures:lecs.length||0,q:0,pct:0,acc:0};
     });
@@ -256,6 +259,16 @@ window.Q={
       dbSessions:[],dbUsers:[],dbQuestions:[],dbQuestionCount:0,selectedLectures:{},testScope:null,practiceError:''});
     await DB.loadSubjectsAndLectures();   // anon RLS returns Medical Ethics only
   },
+  // Stage select (guest entry) — the landing screen.
+  goStageSelect(){setState({screen:'stage',authError:''});},
+  onShowLogin(){setState({screen:'login',authError:''});},
+  // Enter the app as a guest, scoped to the chosen stage.
+  async onPickStage(stage){
+    setState({stage,screen:'dashboard',role:'guest',profile:null,answers:{},flags:{},qPos:0,authError:'',
+      subjectId:'',lectureId:'',lectureName:'',
+      dbSessions:[],dbUsers:[],dbQuestions:[],dbQuestionCount:0,selectedLectures:{},testScope:null,practiceError:''});
+    await DB.loadSubjectsAndLectures();
+  },
   async onLogout(){
     if(S.role!=='guest') await sb.auth.signOut();
     setState({screen:'login',role:'user',profile:null,answers:{},flags:{},qPos:0,activeSessionId:null,authError:'',dbQuestions:[],dbUsers:[],dbSessions:[],testScope:null,selectedLectures:{},practiceError:''});
@@ -376,8 +389,8 @@ window.Q={
     setState({showQAdd:false,addQ:null,qAdding:false,qAddError:'',adminQSubject:draft.subject_id,adminQLecture:draft.lecture_id});
   },
   // ── rename / add topics (subjects) & subtopics (lectures) ──
-  openRenameTopic(id){const s=S.dbSubjects.find(x=>x.id===id);if(!s)return;setState({showTopicModal:true,topicModal:{kind:'subject',mode:'rename',id,name:s.name},topicError:'',topicSaving:false});},
-  openAddTopic(){setState({showTopicModal:true,topicModal:{kind:'subject',mode:'add',name:''},topicError:'',topicSaving:false});},
+  openRenameTopic(id){const s=S.dbSubjects.find(x=>x.id===id);if(!s)return;setState({showTopicModal:true,topicModal:{kind:'subject',mode:'rename',id,name:s.name,stage:s.stage||5},topicError:'',topicSaving:false});},
+  openAddTopic(){setState({showTopicModal:true,topicModal:{kind:'subject',mode:'add',name:'',stage:S.stage||5},topicError:'',topicSaving:false});},
   openRenameSubtopic(id){const l=S.dbLectures.find(x=>x.id===id);if(!l)return;setState({showTopicModal:true,topicModal:{kind:'lecture',mode:'rename',id,name:l.name},topicError:'',topicSaving:false});},
   openAddSubtopic(subjectId){setState({showTopicModal:true,topicModal:{kind:'lecture',mode:'add',parentSubjectId:subjectId,name:''},topicError:'',topicSaving:false});},
   closeTopicModal(){setState({showTopicModal:false,topicModal:null,topicError:'',topicSaving:false});},
@@ -387,7 +400,10 @@ window.Q={
     if(!name){setState({topicError:'Name cannot be empty.'});return;}
     setState({topicSaving:true,topicError:''});
     let res;
-    if(m.kind==='subject')      res=await (m.mode==='rename'?DB.renameSubject(m.id,name):DB.addSubject(name));
+    if(m.kind==='subject'){
+      const stage=parseInt(document.getElementById('topic-stage')?.value||'5',10);
+      res=await (m.mode==='rename'?DB.renameSubject(m.id,name,stage):DB.addSubject(name,stage));
+    }
     else                        res=await (m.mode==='rename'?DB.renameLecture(m.id,name):DB.addLecture(m.parentSubjectId,name));
     if(res?.error){setState({topicSaving:false,topicError:res.error});return;}
     setState({showTopicModal:false,topicModal:null,topicSaving:false,topicError:''});
@@ -481,6 +497,7 @@ const DB = {
     setState({
       profile: prof,
       role: prof.role === 'admin' ? 'admin' : 'user',
+      stage: prof.stage || 5,   // scope the subject list to the student's stage
       screen: 'dashboard',
       loginLoading: false,
       answers:{}, flags: S.flags, qPos:0, authError:'',
@@ -543,17 +560,22 @@ const DB = {
     return {};
   },
 
-  async renameSubject(id, name){
-    const {error} = await sb.from('subjects').update({name}).eq('id', id);
+  async renameSubject(id, name, stage){
+    // `stage` is optional so the call degrades gracefully if migration 018 (the
+    // subjects.stage column) hasn't been applied to the database yet.
+    let {error} = await sb.from('subjects').update({name, stage}).eq('id', id);
+    if(error && /stage/i.test(error.message||'')) ({error} = await sb.from('subjects').update({name}).eq('id', id));
     if(error) return {error: error.message};
     await DB.loadSubjectsAndLectures();
     return {};
   },
 
-  async addSubject(name){
+  async addSubject(name, stage){
     const id = uniqueId(slugId(name), S.dbSubjects.map(s=>s.id));
     const maxSort = S.dbSubjects.reduce((m,s)=>Math.max(m,s.sort_order||0), 0);
-    const {error} = await sb.from('subjects').insert({id, name, hue:255, sort_order:maxSort+1, is_active:true});
+    const base = {id, name, hue:255, sort_order:maxSort+1, is_active:true};
+    let {error} = await sb.from('subjects').insert({...base, stage:stage||5});
+    if(error && /stage/i.test(error.message||'')) ({error} = await sb.from('subjects').insert(base));
     if(error) return {error: error.message};
     await DB.loadSubjectsAndLectures();
     return {};
@@ -665,7 +687,14 @@ const DB = {
 };
 
 /* ── boot: restore session ── */
-render(); // show login immediately — don't wait for async session check
+// Deep links: ?stage=5 / ?stage=6 jump straight into that stage as a guest.
+// Otherwise the stage picker is the landing screen (returning logged-in users
+// are sent on to the dashboard by the session-restore code below).
+const _urlStage = parseInt(new URLSearchParams(location.search).get('stage'), 10);
+const _hasStageLink = (_urlStage === 5 || _urlStage === 6);
+if(_hasStageLink){ S.screen = 'stage'; Q.onPickStage(_urlStage); }
+else { S.screen = 'stage'; }
+render(); // show landing immediately — don't wait for async session check
 
 let _restoring = false;
 
@@ -676,7 +705,7 @@ sb.auth.onAuthStateChange((event, session) => {
   // awaiting any other supabase call here (as DB.afterLogin does) deadlocks the client
   // and hangs every subsequent auth/DB request — the "spinner forever" bug. Defer the
   // work with setTimeout so it runs after the callback returns and the lock is released.
-  if(event === 'SIGNED_IN' && session && S.screen === 'login' && !S.loginLoading && !_restoring){
+  if(event === 'SIGNED_IN' && session && !_hasStageLink && (S.screen === 'login' || S.screen === 'stage') && !S.loginLoading && !_restoring){
     _restoring = true;
     setTimeout(async () => {
       try { await DB.afterLogin(session.user); } finally { _restoring = false; }
@@ -686,7 +715,7 @@ sb.auth.onAuthStateChange((event, session) => {
 
 (async()=>{
   const {data:{session}} = await sb.auth.getSession();
-  if(session && S.screen === 'login' && !S.loginLoading && !_restoring){
+  if(session && !_hasStageLink && (S.screen === 'login' || S.screen === 'stage') && !S.loginLoading && !_restoring){
     _restoring = true;
     try { await DB.afterLogin(session.user); } finally { _restoring = false; }
   }
@@ -727,6 +756,54 @@ document.addEventListener('keydown',e=>{
 
 /* ═══════════════════════════════ RENDER ═══════════════════════════════ */
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+
+function renderStage(){
+  // Dark-on-light tile colours for the stage badges (independent of theme).
+  const tileFor=hue=>({bg:'oklch(0.30 0.055 '+hue+')',fg:'oklch(0.80 0.12 '+hue+')'});
+  const stages=[
+    {key:4,short:'4th',title:'4th Stage',desc:'4th-year curriculum is being prepared — unlocking soon.',hue:150,soon:true},
+    {key:5,short:'5th',title:'5th Stage',desc:'Medicine, Surgery, Pediatric, Gynaecology & more — the full 5th-year MCQ bank.',hue:255,soon:false},
+    {key:6,short:'6th',title:'6th Stage',desc:'Final-year subjects and integrated revision built for the 6th-stage exams.',hue:48,soon:false},
+  ];
+  const cards=stages.map(s=>{
+    const t=tileFor(s.hue), disabled=s.soon;
+    return `<button ${disabled?'':`onclick="Q.onPickStage(${s.key})"`} style="position:relative;background:#14161d;border:1.5px solid #272b36;border-radius:18px;padding:24px;cursor:${disabled?'not-allowed':'pointer'};display:flex;flex-direction:column;gap:16px;opacity:${disabled?0.5:1};text-align:left;font-family:Figtree" ${disabled?'':`onmouseover="this.style.borderColor='#5a8df6'" onmouseout="this.style.borderColor='#272b36'"`}>
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div style="width:74px;height:74px;flex:none;border-radius:19px;background:${t.bg};color:${t.fg};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:28px;letter-spacing:-.5px">${s.short}</div>
+        <span class="ms" style="font-size:24px;color:#6b7383">${disabled?'lock':'arrow_forward'}</span>
+      </div>
+      <div>
+        <div style="display:flex;align-items:center;gap:9px;margin-bottom:4px">
+          <div style="font-weight:800;font-size:20px;color:#fff;letter-spacing:-.4px">${s.title}</div>
+          ${s.soon?`<span style="font-weight:700;font-size:10px;letter-spacing:.5px;text-transform:uppercase;color:#9aa3b2;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);padding:3px 8px;border-radius:6px">Soon</span>`:''}
+        </div>
+        <div style="font-weight:500;font-size:13.5px;line-height:1.5;color:#9aa3b2">${s.desc}</div>
+      </div>
+    </button>`;
+  }).join('');
+  return `
+  <div style="min-height:100vh;position:relative;overflow:hidden;background:#0a0b0e;color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 24px">
+    <div style="position:absolute;top:-140px;right:-120px;width:480px;height:480px;border-radius:50%;background:radial-gradient(circle,rgba(243,184,39,.20),transparent 65%)"></div>
+    <div style="position:absolute;bottom:-180px;left:-120px;width:560px;height:560px;border-radius:50%;background:radial-gradient(circle,rgba(39,103,224,.26),transparent 65%)"></div>
+    <div style="position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:space-between;padding:22px 28px">
+      <div style="display:flex;align-items:center;gap:11px">
+        <div style="width:30px;height:30px;border-radius:8px;padding:3px;background:linear-gradient(135deg,#3b82f6,#f3b827)"><div style="width:100%;height:100%;background:#0a0b0e;border-radius:5px"></div></div>
+        <div style="font-weight:800;font-size:18px;color:#fff;letter-spacing:-.5px">Square<span style="color:#f3b827"> QBank</span></div>
+      </div>
+      <button onclick="Q.onShowLogin()" style="height:36px;padding:0 15px;border:none;border-radius:9px;background:#2767e0;color:#fff;font-weight:700;font-size:13.5px;font-family:Figtree;cursor:pointer">Sign in</button>
+    </div>
+    <div style="position:relative;width:100%;max-width:920px;text-align:center;animation:fadeUp .5s ease both">
+      <div style="display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 13px;border-radius:20px;background:rgba(243,184,39,.14);border:1px solid rgba(243,184,39,.3);margin-bottom:22px">
+        <span class="ms" style="font-size:17px;color:#f3b827">explore</span>
+        <span style="font-weight:600;font-size:12.5px;color:#f3c24a">Continuing as guest</span>
+      </div>
+      <h1 style="font-weight:800;font-size:40px;line-height:1.1;letter-spacing:-1.2px;margin:0 0 10px;color:#fff">Choose your stage</h1>
+      <p style="font-weight:400;font-size:16px;line-height:1.6;color:#9aa3b2;margin:0 auto 34px;max-width:440px">Pick your academic stage to load the right curriculum. You can browse free lectures right away — no account needed.</p>
+      <div class="login-grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;text-align:left">${cards}</div>
+    </div>
+    <div style="position:absolute;bottom:24px;font-weight:500;font-size:12.5px;color:#4b5260;text-align:center;padding:0 24px">© 2026 Square QBank · Guest mode gives free access to Medical Ethics lectures</div>
+  </div>`;
+}
 
 function renderLogin(){
   return `
@@ -784,7 +861,7 @@ function renderLogin(){
           <span style="font-weight:500;font-size:12px;color:var(--faint)">or</span>
           <div style="flex:1;height:1px;background:var(--border)"></div>
         </div>
-        <button onclick="Q.onGuest()" style="width:100%;height:46px;border:1.5px solid var(--border);border-radius:12px;background:transparent;color:var(--muted);font-weight:600;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;margin-top:12px"><span class="ms" style="font-size:19px">visibility</span>Continue as guest</button>
+        <button onclick="Q.goStageSelect()" style="width:100%;height:46px;border:1.5px solid var(--border);border-radius:12px;background:transparent;color:var(--muted);font-weight:600;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;margin-top:12px"><span class="ms" style="font-size:19px">visibility</span>Continue as guest</button>
         <p style="font-weight:400;font-size:12px;color:var(--faint);margin:10px 0 0;text-align:center">Guest access is read-only — progress is not saved.</p>
         <p style="font-weight:400;font-size:13px;line-height:1.6;color:var(--faint);margin:16px 0 0;text-align:center">Changed device or lost access?<br><span style="color:var(--blue);font-weight:600;cursor:pointer">Contact your administrator</span> to reset your device lock.</p>
       </div>
@@ -1477,6 +1554,10 @@ function renderApp(){
             ${parent?`<div style="font-weight:500;font-size:12.5px;color:var(--muted);margin-bottom:8px">Under <span style="color:var(--text);font-weight:700">${esc(parent)}</span></div>`:''}
             <label style="${lblCss}">${m.kind==='subject'?'Topic':'Subtopic'} name</label>
             <input id="topic-name" value="${esc(m.name||'')}" placeholder="${m.kind==='subject'?'e.g. Surgery':'e.g. Cardiology'}" style="${inCss}" onkeydown="if(event.key==='Enter')Q.onSaveTopic()">
+            ${m.kind==='subject'?`<label style="${lblCss};margin-top:14px">Stage</label>
+            <select id="topic-stage" style="${inCss}">
+              ${[5,6].map(st=>`<option value="${st}" ${(m.stage||5)===st?'selected':''}>${st}th stage</option>`).join('')}
+            </select>`:''}
             <div style="display:flex;gap:10px;margin-top:20px">
               <button onclick="Q.closeTopicModal()" style="flex:1;height:46px;border:1.5px solid var(--border);border-radius:12px;background:var(--surface);color:var(--text);font-weight:700;font-size:14px;cursor:pointer">Cancel</button>
               <button onclick="Q.onSaveTopic()" style="flex:2;height:46px;border:none;border-radius:12px;background:var(--blue);color:#fff;font-weight:700;font-size:14px;cursor:pointer;opacity:${S.topicSaving?.6:1}">${S.topicSaving?'Saving…':(m.mode==='rename'?'Save':'Add')}</button>
@@ -1598,7 +1679,8 @@ function render(){
   root.setAttribute('data-theme', S.theme);
   root.style.cssText='min-height:100vh;background:var(--bg);color:var(--text);font-family:Figtree,sans-serif;-webkit-font-smoothing:antialiased';
 
-  if(S.screen==='login') root.innerHTML=renderLogin();
+  if(S.screen==='stage') root.innerHTML=renderStage();
+  else if(S.screen==='login') root.innerHTML=renderLogin();
   else if(S.screen==='solver') root.innerHTML=renderSolver();
   else root.innerHTML=renderApp();
 }
