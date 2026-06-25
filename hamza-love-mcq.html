@@ -91,41 +91,6 @@
         </div>
       </sc-if>
 
-      <!-- ========================= PRACTICE SETUP ========================= -->
-      <sc-if value="{{ isPracticeSetup }}" hint-placeholder-val="{{ false }}">
-        <div style="height:100%;display:flex;flex-direction:column;">
-          <div style="padding:58px 18px 14px;display:flex;align-items:center;gap:12px;">
-            <button onClick="{{ goHome }}" style="width:38px;height:38px;border-radius:12px;background:#fff;border:1.5px solid #E3EAE5;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#16211D" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>
-            </button>
-            <div style="font-weight:800;font-size:20px;">Practice setup</div>
-          </div>
-          <div style="flex:1;overflow:auto;padding:8px 22px 18px;">
-            <div style="font-size:12px;font-weight:700;color:#7C8B84;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:12px;">Subject</div>
-            <div style="display:flex;flex-wrap:wrap;gap:9px;">
-              <sc-for list="{{ subjectChips }}" as="chip" hint-placeholder-count="6">
-                <button onClick="{{ chip.onTap }}" style="{{ chip.style }}">{{ chip.label }}</button>
-              </sc-for>
-            </div>
-            <div style="font-size:12px;font-weight:700;color:#7C8B84;text-transform:uppercase;letter-spacing:0.6px;margin:26px 0 12px;">Difficulty</div>
-            <div style="display:flex;flex-wrap:wrap;gap:9px;">
-              <sc-for list="{{ diffChips }}" as="chip" hint-placeholder-count="4">
-                <button onClick="{{ chip.onTap }}" style="{{ chip.style }}">{{ chip.label }}</button>
-              </sc-for>
-            </div>
-            <div style="margin-top:26px;background:#fff;border-radius:18px;padding:16px 18px;display:flex;align-items:center;gap:12px;box-shadow:0 2px 12px rgba(20,60,45,0.05);">
-              <div style="width:40px;height:40px;border-radius:12px;background:#E6F3EF;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#2E9B89" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v.01M11 12h1v4h1"/></svg>
-              </div>
-              <div style="font-size:13.5px;color:#3C4A44;line-height:1.45;">{{ practiceCount }} questions match your selection. Answers and explanations show after each.</div>
-            </div>
-          </div>
-          <div style="padding:14px 22px 34px;background:#E7EFE9;">
-            <button onClick="{{ startPractice }}" style="width:100%;border:none;border-radius:16px;padding:16px;background:#2E9B89;color:#fff;font-weight:700;font-size:16px;cursor:pointer;box-shadow:0 6px 18px rgba(46,155,137,0.32);">Start practice</button>
-          </div>
-        </div>
-      </sc-if>
-
       <!-- ============================ PRACTICE ============================ -->
       <sc-if value="{{ isPractice }}" hint-placeholder-val="{{ false }}">
         <div style="height:100%;display:flex;flex-direction:column;">
@@ -541,25 +506,11 @@ class Component extends DCLogic {
   // ---- navigation ----
   go(screen) { this.setState({ screen }); }
   goHome = () => { clearInterval(this.timer); this.setState({ screen: 'home', showSubmit: false }); };
-  goPractice = () => this.setState({ screen: 'practiceSetup' });
-  goExam = () => this.setState({ screen: 'examSetup' });
-
-  // ---- practice ----
-  setSubject = (s) => this.setState({ subject: s });
-  setDiff = (d) => this.setState({ diff: d });
-
-  startPractice = () => {
-    const order = this.bank
-      .map((q, i) => i)
-      .filter(i => {
-        const q = this.bank[i];
-        const subjOk = this.state.subject === 'All' || q.subject === this.state.subject;
-        const diffOk = this.state.diff === 'All' || q.diff === this.state.diff;
-        return subjOk && diffOk;
-      });
-    const finalOrder = order.length ? order : this.bank.map((q, i) => i);
-    this.setState({ screen: 'practice', pOrder: finalOrder, pIndex: 0, pSelected: null, pChecked: false, pResults: {} });
+  goPractice = () => {
+    const order = this.bank.map((q, i) => i);
+    this.setState({ screen: 'practice', pOrder: order, pIndex: 0, pSelected: null, pChecked: false, pResults: {} });
   };
+  goExam = () => this.setState({ screen: 'examSetup' });
   selectPractice(i) { if (!this.state.pChecked) this.setState({ pSelected: i }); }
   checkPractice = () => {
     if (this.state.pSelected == null) return;
@@ -651,7 +602,6 @@ class Component extends DCLogic {
     const v = {
       screen,
       isHome: screen === 'home',
-      isPracticeSetup: screen === 'practiceSetup',
       isPractice: screen === 'practice',
       isPracticeDone: screen === 'practiceDone',
       isExamSetup: screen === 'examSetup',
@@ -667,14 +617,6 @@ class Component extends DCLogic {
       showSubmit: s.showSubmit,
       bankCount: this.bank.length,
     };
-
-    // practice setup chips
-    const matchCount = this.bank.filter(q =>
-      (s.subject === 'All' || q.subject === s.subject) &&
-      (s.diff === 'All' || q.diff === s.diff)).length;
-    v.practiceCount = matchCount || this.bank.length;
-    v.subjectChips = this.subjects.map(sub => ({ label: sub, style: this.chipStyle(s.subject === sub), onTap: () => this.setSubject(sub) }));
-    v.diffChips = ['All', 'Easy', 'Medium', 'Hard'].map(d => ({ label: d, style: this.chipStyle(s.diff === d), onTap: () => this.setDiff(d) }));
 
     // exam config
     v.cfgCount = s.examConfig.count;
