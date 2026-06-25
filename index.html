@@ -113,6 +113,13 @@ const S = {
   // and the active pass are persisted too, so returning resumes the view.
   passes:[{id:'study',name:'Study',type:'study'}], activePass:'study',
   checks:{study:{}}, openMat:{}, openTopic:{},
+  // 6th-stage view mode: 'checklist' (default) or 'quiz'. In quiz mode each
+  // blueprint topic links to its own MCQ set (Supabase, served by the solver).
+  sixthMode:'checklist',
+  quizCounts:null,               // lectureId -> #active questions (null until loaded)
+  quizQMat:{}, quizError:'',     // open materials in quiz mode; topic-launch error
+  quizTopic:null,                // {matId,ti} of the running topic quiz (for Retry)
+  sixthQuiz:false,               // true while a stage-6 topic quiz is running
 };
 
 let _timerInterval = null;
@@ -198,6 +205,10 @@ function curChecks(){ if(!S.checks[S.activePass]) S.checks[S.activePass]={}; ret
 // All subtopic ids under a material / a topic — used for progress and "tick all".
 function matSubIds(m){ const ids=[]; m.topics.forEach((t,ti)=>t.s.forEach((_,si)=>ids.push(m.id+'.'+ti+'.'+si))); return ids; }
 function topicSubIds(mId,ti,t){ return t.s.map((_,si)=>mId+'.'+ti+'.'+si); }
+// Quiz mode maps each blueprint material/topic to a Supabase subject/lecture.
+// IDs must match supabase/migrations/019_seed_6th_blueprint.sql exactly.
+function bpSubjId(mId){ return 'bp6_'+mId; }
+function bpLecId(mId,ti){ return 'bp6_'+mId+'_'+ti; }
 // Restore the whole checklist (passes, active pass, ticks, open sections) so a
 // returning user resumes where they were. Runs now that BP_KEY is defined.
 (function(){ const v=loadBP(); S.passes=v.passes; S.activePass=v.activePass; S.checks=v.checks; S.openMat=v.openMat||{}; S.openTopic=v.openTopic||{}; })();
@@ -357,7 +368,8 @@ window.Q={
     setState({stage,screen:'dashboard',role:'guest',profile:null,answers:{},flags:{},qPos:0,authError:'',
       subjectId:'',lectureId:'',lectureName:'',
       dbSessions:[],dbUsers:[],dbQuestions:[],dbQuestionCount:0,selectedLectures:{},testScope:null,practiceError:''});
-    if(stage!==6) await DB.loadSubjectsAndLectures();   // 6th stage uses the blueprint checklist, not the DB
+    if(stage===6){ DB.loadSixthCounts(); }              // quiz mode needs per-topic question counts
+    else await DB.loadSubjectsAndLectures();            // 5th stage uses the DB subject list
   },
   // ── 6th-stage blueprint checklist ──
   toggleMatOpen(matId){ S.openMat[matId]=!S.openMat[matId]; saveBP(); setState({openMat:{...S.openMat}}); },
@@ -384,6 +396,22 @@ window.Q={
     const c={...S.checks}; delete c[id]; S.checks=c;
     if(S.activePass===id) S.activePass='study';
     saveBP(); setState({});
+  },
+  // ── 6th-stage quiz mode (per-topic MCQs) ──
+  setSixthMode(mode){ if(mode==='quiz'&&S.quizCounts===null) DB.loadSixthCounts(); setState({sixthMode:mode,quizError:''}); },
+  toggleQuizMat(matId){ S.quizQMat[matId]=!S.quizQMat[matId]; setState({quizQMat:{...S.quizQMat}}); },
+  async startTopicQuiz(matId,ti){
+    const m=BLUEPRINT_6TH.find(x=>x.id===matId); if(!m)return;
+    const tp=m.topics[ti]; const lecId=bpLecId(matId,ti);
+    setState({quizError:''});
+    await DB.loadQuestionsForLectures([lecId]);
+    const qs=questions();
+    if(!qs.length){ setState({quizError:lecId}); return; }   // honest empty state on the topic row
+    const queue=qs.map((_,i)=>i).sort(()=>Math.random()-0.5);
+    setState({mode:'study',queue,qPos:0,answers:{},activeSessionId:null,
+      testScope:{type:'lecture',lectureIds:[lecId],label:tp.t,subjectName:m.name},
+      subjectId:'',lectureId:lecId,lectureName:tp.t,quizTopic:{matId,ti},
+      sessionSubject:m.name,sessionLecture:tp.t,sixthQuiz:true,screen:'solver'});
   },
   async onLogout(){
     if(S.role!=='guest') await sb.auth.signOut();
@@ -434,8 +462,10 @@ window.Q={
   onStartStudy(){Q.startSession('study');},
   onStartExam(){Q.startSession('exam');},
   onRetry(){Q.startSession('study');},
-  onExitSolver(){setState({screen:S.subjectId?'modeselect':'dashboard'});},
-  onFinish(){DB.completeSession();setState({screen:'results'});},
+  onExitSolver(){ if(S.sixthQuiz){ setState({sixthQuiz:false,screen:'dashboard'}); return; } setState({screen:S.subjectId?'modeselect':'dashboard'}); },
+  onFinish(){ if(S.sixthQuiz){ setState({screen:'sixresult'}); return; } DB.completeSession();setState({screen:'results'}); },
+  // back to the topic list after a stage-6 quiz result
+  backToTopics(){ setState({sixthQuiz:false,screen:'dashboard'}); },
   choose(i){
     const q=curQ();const a={...S.answers};
     if(S.mode==='study'&&a[q.id]!==undefined)return;
@@ -639,6 +669,15 @@ const DB = {
     const {data} = await sb.from('questions').select('*')
       .eq('is_active', true).in('lecture_id', ids).order('created_at');
     setState({dbQuestions: data||[]});
+  },
+
+  // Per-topic question counts for the 6th-stage quiz list. One light query
+  // (lecture_id only) over the whole bp6 bank; RLS lets guests read it.
+  async loadSixthCounts(){
+    const {data} = await sb.from('questions').select('lecture_id')
+      .like('subject_id','bp6_%').eq('is_active',true);
+    const counts={}; (data||[]).forEach(r=>{ counts[r.lecture_id]=(counts[r.lecture_id]||0)+1; });
+    setState({quizCounts:counts});
   },
 
   async loadSessions(userId){
@@ -873,6 +912,39 @@ document.addEventListener('keydown',e=>{
 /* ═══════════════════════════════ RENDER ═══════════════════════════════ */
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 
+// Shared chrome for the two 6th-stage views (Checklist + Quiz): the top bar,
+// a segmented Checklist/Quiz toggle, the title/intro, then the view body.
+function sixthShell(mode, title, intro, bodyHTML){
+  const themeIcon=S.theme==='dark'?'light_mode':'dark_mode';
+  const seg=(key,label,icon)=>{
+    const on=mode===key;
+    return `<button onclick="Q.setSixthMode('${key}')" style="display:flex;align-items:center;gap:7px;height:34px;padding:0 16px;border:none;border-radius:9px;background:${on?'var(--surface)':'transparent'};color:${on?'var(--text)':'var(--muted)'};font-weight:700;font-size:13.5px;font-family:Figtree;cursor:pointer;box-shadow:${on?'var(--shadow)':'none'}"><span class="ms" style="font-size:18px;font-variation-settings:'FILL' ${on?1:0}">${icon}</span>${label}</button>`;
+  };
+  return `
+  <div style="min-height:100vh;display:flex;flex-direction:column;background:var(--bg)">
+    <div class="app-header" style="height:60px;flex:none;display:flex;align-items:center;gap:14px;padding:0 20px;background:var(--surface);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:5">
+      <div style="display:flex;align-items:center;gap:11px">
+        <div style="width:30px;height:30px;border-radius:8px;padding:3px;background:linear-gradient(135deg,#3b82f6,#f3b827)"><div style="width:100%;height:100%;background:var(--surface);border-radius:5px"></div></div>
+        <div style="font-weight:800;font-size:17px;letter-spacing:-.5px;color:var(--text)">Square<span style="color:var(--yellow-ink)"> QBank</span></div>
+      </div>
+      <div style="font-weight:600;font-size:13px;color:var(--muted);padding:4px 10px;border-radius:20px;background:var(--surface2);border:1px solid var(--border)">6th Stage</div>
+      <div style="flex:1"></div>
+      <button onclick="Q.onToggleTheme()" style="width:38px;height:38px;border:1px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text);cursor:pointer;display:flex;align-items:center;justify-content:center"><span class="ms" style="font-size:20px">${themeIcon}</span></button>
+      <button onclick="Q.goStageSelect()" style="display:flex;align-items:center;gap:6px;height:38px;padding:0 13px;border:1px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text);font-weight:600;font-size:14px;cursor:pointer"><span class="ms" style="font-size:18px">swap_horiz</span><span class="rlabel">Change stage</span></button>
+    </div>
+    <div style="flex:1;overflow:auto;padding:30px 20px 80px">
+      <div style="max-width:880px;margin:0 auto;animation:fadeUp .35s ease both">
+        <div style="display:inline-flex;align-items:center;gap:4px;padding:4px;border-radius:12px;background:var(--surface2);border:1px solid var(--border);margin-bottom:20px">
+          ${seg('checklist','Checklist','fact_check')}${seg('quiz','Quiz','quiz')}
+        </div>
+        <h1 style="font-weight:800;font-size:26px;letter-spacing:-.7px;color:var(--text);margin:0 0 4px">${title}</h1>
+        <p style="font-weight:500;font-size:14px;color:var(--muted);margin:0 0 20px">${intro}</p>
+        ${bodyHTML}
+      </div>
+    </div>
+  </div>`;
+}
+
 function renderChecklist(){
   const dark=S.theme==='dark';
   const themeIcon=dark?'light_mode':'dark_mode';
@@ -951,28 +1023,87 @@ function renderChecklist(){
     </div>`;
   }).join('');
 
-  return `
-  <div style="min-height:100vh;display:flex;flex-direction:column;background:var(--bg)">
-    <div class="app-header" style="height:60px;flex:none;display:flex;align-items:center;gap:14px;padding:0 20px;background:var(--surface);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:5">
-      <div style="display:flex;align-items:center;gap:11px">
-        <div style="width:30px;height:30px;border-radius:8px;padding:3px;background:linear-gradient(135deg,#3b82f6,#f3b827)"><div style="width:100%;height:100%;background:var(--surface);border-radius:5px"></div></div>
-        <div style="font-weight:800;font-size:17px;letter-spacing:-.5px;color:var(--text)">Square<span style="color:var(--yellow-ink)"> QBank</span></div>
-      </div>
-      <div style="font-weight:600;font-size:13px;color:var(--muted);padding:4px 10px;border-radius:20px;background:var(--surface2);border:1px solid var(--border)">6th Stage</div>
-      <div style="flex:1"></div>
-      <button onclick="Q.onToggleTheme()" style="width:38px;height:38px;border:1px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text);cursor:pointer;display:flex;align-items:center;justify-content:center"><span class="ms" style="font-size:20px">${themeIcon}</span></button>
-      <button onclick="Q.goStageSelect()" style="display:flex;align-items:center;gap:6px;height:38px;padding:0 13px;border:1px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text);font-weight:600;font-size:14px;cursor:pointer"><span class="ms" style="font-size:18px">swap_horiz</span><span class="rlabel">Change stage</span></button>
-    </div>
-    <div style="flex:1;overflow:auto;padding:30px 20px 80px">
-      <div style="max-width:880px;margin:0 auto;animation:fadeUp .35s ease both">
-        <h1 style="font-weight:800;font-size:26px;letter-spacing:-.7px;color:var(--text);margin:0 0 4px">Exam blueprint checklist</h1>
-        <p style="font-weight:500;font-size:14px;color:var(--muted);margin:0 0 20px">Track your progress across the four 6th-year materials. Open a material to reveal its core topics, then open a topic to tick its subtopics. Use separate Study and Revision passes — everything is saved on this device and resumes when you return.</p>
+  const body = `
         ${banner}
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);padding:18px 20px;margin-bottom:20px">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px"><span style="font-weight:700;font-size:14px;color:var(--text)">Overall progress</span><span style="font-weight:800;font-size:15px;color:var(--text)">${gPct}% · ${gDone}/${gTotal}</span></div>
           <div style="height:9px;border-radius:9px;background:var(--surface3);overflow:hidden"><div style="height:100%;width:${gPct}%;background:linear-gradient(90deg,var(--blue),var(--yellow))"></div></div>
         </div>
-        <div style="display:flex;flex-direction:column;gap:14px">${materials}</div>
+        <div style="display:flex;flex-direction:column;gap:14px">${materials}</div>`;
+  return sixthShell('checklist','Exam blueprint checklist',
+    'Track your progress across the four 6th-year materials. Open a material to reveal its core topics, then open a topic to tick its subtopics. Use separate Study and Revision passes — everything is saved on this device and resumes when you return.',
+    body);
+}
+
+// Quiz mode: the same blueprint materials/topics, but each topic links to its
+// own MCQ set (Supabase-backed, served by the solver). Topics with no questions
+// yet show an honest empty state until the bank is filled in via the admin panel.
+function renderQuiz(){
+  const counts=S.quizCounts;   // null until loaded; {} once loaded with no rows
+  const loading=counts===null;
+  let gQ=0; if(counts) Object.values(counts).forEach(n=>gQ+=n);
+
+  const materials = BLUEPRINT_6TH.map(m=>{
+    const t=tile(m.hue);
+    const mQ=m.topics.reduce((n,_,ti)=>n+((counts&&counts[bpLecId(m.id,ti)])||0),0);
+    const ready=m.topics.reduce((n,_,ti)=>n+(((counts&&counts[bpLecId(m.id,ti)])||0)>0?1:0),0);
+    const open=!!S.quizQMat[m.id];
+    const topicsHTML = open ? m.topics.map((tp,ti)=>{
+      const lecId=bpLecId(m.id,ti); const n=(counts&&counts[lecId])||0;
+      const has=n>0; const err=S.quizError===lecId;
+      const right = has
+        ? `<span style="display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 13px;border-radius:9px;background:var(--blue);color:#fff;font-weight:700;font-size:13px"><span class="ms" style="font-size:17px">play_arrow</span>Quiz · ${n}</span>`
+        : `<span style="font-weight:600;font-size:12px;color:var(--faint)">No questions yet</span>`;
+      return `<div ${has?`onclick="Q.startTopicQuiz('${m.id}',${ti})"`:''} style="display:flex;align-items:center;gap:12px;padding:12px 16px 12px 18px;border-top:1px solid var(--border);cursor:${has?'pointer':'default'}">
+          <span style="font-weight:600;font-size:14px;color:${has?'var(--text)':'var(--muted)'};flex:1;min-width:0">${esc(tp.t)}${err?`<span style="display:block;font-weight:500;font-size:11.5px;color:var(--red);margin-top:2px">No questions in this topic yet.</span>`:''}</span>
+          ${right}
+        </div>`;
+    }).join('') : '';
+    return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">
+      <div onclick="Q.toggleQuizMat('${m.id}')" style="display:flex;align-items:center;gap:14px;padding:16px 18px;cursor:pointer">
+        <div style="width:44px;height:44px;flex:none;border-radius:12px;background:${t.bg};color:${t.fg};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:17px">${esc(m.name[0])}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:800;font-size:16px;color:var(--text)">${esc(m.name)}</div>
+          <div style="font-weight:500;font-size:12.5px;color:var(--muted);margin-top:3px">${loading?'Loading…':`${mQ} question${mQ===1?'':'s'} · ${ready}/${m.topics.length} topics ready`}</div>
+        </div>
+        <span class="ms" style="font-size:24px;color:var(--faint)">${open?'expand_less':'expand_more'}</span>
+      </div>
+      ${topicsHTML}
+    </div>`;
+  }).join('');
+
+  const summary = `
+        <div style="display:flex;align-items:center;gap:13px;background:var(--surface);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow);padding:14px 16px;margin-bottom:18px">
+          <span class="ms" style="font-size:24px;color:var(--blue)">quiz</span>
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:800;font-size:14px;color:var(--text)">Quiz yourself by topic</div>
+            <div style="font-weight:500;font-size:12px;color:var(--muted)">${loading?'Loading the question bank…':(gQ?`${gQ} question${gQ===1?'':'s'} available across the four materials. Open a material and pick a topic to start.`:'No questions in the bank yet — they’ll appear here as topics are filled in.')}</div>
+          </div>
+        </div>`;
+  const body = summary + `<div style="display:flex;flex-direction:column;gap:14px">${materials}</div>`;
+  return sixthShell('quiz','Topic quizzes',
+    'Test yourself on the same materials and topics as the checklist. Each topic draws a fresh, shuffled set of single-best-answer MCQs with instant explanations.',
+    body);
+}
+
+// Result summary after a 6th-stage topic quiz (guests have no saved sessions,
+// so the score is computed locally from the answered queue).
+function renderSixResult(){
+  const qs=questions(); let correct=0,answered=0;
+  qs.forEach(q=>{const a=S.answers[q.id];if(a!==undefined){answered++;if(a===q.answer)correct++;}});
+  const total=qs.length; const pct=answered?Math.round(correct/answered*100):0;
+  const good=pct>=70, ok=pct>=40;
+  const accCol=good?'var(--green)':(ok?'var(--yellow-ink)':'var(--red)');
+  return `
+  <div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--bg);padding:40px 20px">
+    <div style="width:100%;max-width:460px;text-align:center;animation:pop .25s ease both">
+      <div style="width:84px;height:84px;margin:0 auto 22px;border-radius:50%;background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow);display:flex;align-items:center;justify-content:center"><span class="ms" style="font-size:46px;color:${accCol};font-variation-settings:'FILL' 1">${good?'military_tech':(ok?'thumb_up':'replay')}</span></div>
+      <div style="font-weight:600;font-size:12.5px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin-bottom:6px">${esc(S.sessionSubject)} · ${esc(S.sessionLecture)}</div>
+      <h1 style="font-weight:800;font-size:30px;letter-spacing:-.8px;color:var(--text);margin:0 0 4px">${correct}/${answered||total} correct</h1>
+      <div style="font-weight:700;font-size:16px;color:${accCol};margin-bottom:24px">${pct}% accuracy</div>
+      <div style="display:flex;gap:12px;justify-content:center">
+        <button onclick="Q.startTopicQuiz('${S.quizTopic?S.quizTopic.matId:''}',${S.quizTopic?S.quizTopic.ti:0})" style="display:flex;align-items:center;gap:7px;height:46px;padding:0 20px;border:1px solid var(--border);border-radius:11px;background:var(--surface);color:var(--text);font-weight:700;font-size:15px;cursor:pointer"><span class="ms" style="font-size:20px">replay</span>Retry topic</button>
+        <button onclick="Q.backToTopics()" style="display:flex;align-items:center;gap:7px;height:46px;padding:0 22px;border:none;border-radius:11px;background:var(--blue);color:#fff;font-weight:700;font-size:15px;cursor:pointer"><span class="ms" style="font-size:20px">grid_view</span>All topics</button>
       </div>
     </div>
   </div>`;
@@ -1902,8 +2033,9 @@ function render(){
 
   if(S.screen==='stage') root.innerHTML=renderStage();
   else if(S.screen==='login') root.innerHTML=renderLogin();
-  else if(S.stage===6 && S.role!=='admin') root.innerHTML=renderChecklist();   // 6th stage = blueprint checklist
-  else if(S.screen==='solver') root.innerHTML=renderSolver();
+  else if(S.screen==='solver') root.innerHTML=renderSolver();                    // in-progress quiz (incl. 6th stage)
+  else if(S.stage===6 && S.role!=='admin' && S.screen==='sixresult') root.innerHTML=renderSixResult();
+  else if(S.stage===6 && S.role!=='admin') root.innerHTML=(S.sixthMode==='quiz'?renderQuiz():renderChecklist());   // 6th stage = checklist + quiz
   else root.innerHTML=renderApp();
 }
 
