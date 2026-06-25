@@ -108,9 +108,90 @@ const S = {
   deleteQId:null, qDeleting:false,
   showQAdd:false, addQ:null, qAddError:'', qAdding:false,   // admin: add new MCQ
   showTopicModal:false, topicModal:null, topicError:'', topicSaving:false, // admin: rename/add topic & subtopic
+  checks:{}, openMat:{}, openTopic:{},   // 6th-stage blueprint checklist (localStorage-backed)
 };
 
 let _timerInterval = null;
+
+/* ── 6th-stage blueprint checklist ──
+   Source: Committee of Colleges of Medicine in Iraq — 6th-year assessment
+   blueprints (2024-2025) for Medicine, Surgery, Gynae/Obstetrics & Pediatrics.
+   Material → core topic → subtopics. Tick state is saved per device in
+   localStorage (guest / "for now" mode). */
+const BLUEPRINT_6TH = [
+  { id:'med', name:'Medicine', hue:255, topics:[
+    { t:'Cardiovascular (CVS)', s:['Cardiac arrest & cardiopulmonary resuscitation','Hypertension & hypertensive emergency, Aortic dissection','Acute coronary syndrome (STEMI, NSTEMI & unstable angina)','Heart failure (systolic & diastolic), acute pulmonary edema','Cardiac tamponade & pericardial diseases','Atrial fibrillation','Supraventricular tachycardia','Rheumatic fever, valvular heart disease, infective endocarditis','Congenital heart diseases; VSD, ASD, TOF, PDA','Cardiomyopathy','Primary & secondary prevention of cardiovascular diseases'] },
+    { t:'Respiratory', s:['Asthma & allergic bronchitis','Acute upper respiratory tract infection','The pneumonias (lower respiratory tract infections)','Suppurative lung disease & bronchiectasis','Pulmonary tuberculosis','Respiratory failure','Pleural disease (effusion + pneumothorax)','Lung cancer','Acute pulmonary embolism','Chronic bronchitis and emphysema (COPD)','Interstitial lung diseases, fibrosing & extrinsic allergic alveolitis','Adult respiratory distress syndrome (ARDS)'] },
+    { t:'GIT & Hepatology', s:['Oesophagitis & GERD','Gastritis and peptic ulcer','GIT bleeding','Malabsorption','Chronic inflammatory bowel diseases','Irritable bowel syndrome','Viral hepatitis, acute fulminant hepatic failure','Fatty liver, non-alcoholic fatty liver disease (NAFLD)','Chronic liver disease, cirrhosis and portal hypertension','Drug induced liver disease','Acute & chronic pancreatitis','Autoimmune hepatitis','Metabolic liver disease; Wilson, alpha-1 antitrypsin deficiency, hemochromatosis'] },
+    { t:'Haematology & Oncology', s:['Aplastic anemia','Anemia of chronic disease','Iron deficiency anemia','Autoimmune hemolytic anemia','Hemoglobinopathies; thalassemia, sickle cell disease, G6PD deficiency','Acute leukemia','Bleeding disorders; hemophilia, Von Willebrand disease, ITP','Chronic leukaemia','Megaloblastic anemia','Myelodysplastic syndrome','Non-Hodgkin & Hodgkin lymphoma','Bone marrow transplantation','Tumor lysis syndrome, hypercalcemia','Multiple myeloma','Blood transfusion & complications','Polycythaemias, essential thrombocythemia'] },
+    { t:'Endocrinology & Diabetes', s:['Hyperthyroidism','Hypothyroidism and thyroiditis','Pituitary gland disorders','Adrenal insufficiency & hyperfunction','Hyperparathyroidism, hypoparathyroidism and tetany','Hyperlipidaemia','Diabetes mellitus (acute & chronic complications)','Osteoporosis, osteomalacia and vitamin D','Hypogonadism, hirsutism & male infertility','Malnutrition, obesity, minerals'] },
+    { t:'Neurology', s:['Diseases of cranial nerves (1-12 CN palsy)','Seizures, status epilepticus','Demyelinating diseases; multiple sclerosis','Cerebrovascular accident (ischemic & haemorrhagic)','Spinal cord diseases, transverse myelitis','Migraine & headache, idiopathic intracranial hypertension','Infections of nervous system (meningitis & encephalitis)','Peripheral & diabetic neuropathy, post-infective neuropathy','Extrapyramidal disorders, parkinsonism','Degenerative diseases (motor neuron disease)'] },
+    { t:'Nephrology', s:['Nephrotic syndrome','Acute renal failure','Renal dialysis - CAPD','Kidney transplantation','Glomerulonephritis','Chronic renal failure','Electrolyte disturbance, water balance & blood gas analysis','Systemic disease and the kidney','Urinary tract infection','Drug induced nephropathy'] },
+    { t:'Infectious Diseases', s:['Infectious mononucleosis','Malaria, leishmaniasis, toxoplasmosis, hydatid cyst','Exanthematous febrile illness; measles, mumps, herpes simplex','HIV infection','Brucellosis & salmonellosis','Food poisoning & acute diarrheal disease','Amoebiasis, giardiasis and helminthic infection','Viral haemorrhagic fever','Tetanus and rabies, staphylococcal & streptococcal infection','Systemic inflammatory response syndrome (SIRS) & septic shock','Fever of unknown origin'] },
+    { t:'Rheumatology', s:['Degenerative arthritis; spondyloarthritis, osteoarthritis','Crystal arthropathy','Metabolic bone diseases','Rheumatoid arthritis','Systemic lupus erythematosus','Scleroderma','Vasculitis','Dermatomyositis, polymyositis, Behcet syndrome','Sjogren syndrome'] },
+    { t:'Dermatology', s:['Psoriasis','Urticaria and erythema','Sexually transmitted diseases'] },
+    { t:'Psychiatry', s:['Mood disorders','Schizophrenia','Psychosomatic disorders'] },
+  ]},
+  { id:'surgery', name:'Surgery', hue:8, topics:[
+    { t:'Basic Surgical Principles', s:['Metabolic response to injury','Shock, hemorrhage and transfusion','Wound healing and tissue repair','Surgical infection','Tropical infections','Basic surgical skills','Principles of minimal access surgery','Principles of oncology','Tissue and molecular diagnosis','Ethics / patient safety'] },
+    { t:'Paediatric Surgery', s:['Pediatric pathologies and surgery','Trauma in children'] },
+    { t:'Peri-operative Care', s:['Peri-operative care for high risk patients','Day case surgery','Nutrition and fluid therapy'] },
+    { t:'Abdominal Wall, Hernia & Umbilicus', s:['Hernia (anatomy / types / presentation / surgery)','Abdominal & umbilical infections & tumors'] },
+    { t:'Diabetic Foot, Ulcer, Sinus, Fistula & Cyst', s:['Diabetic foot (anatomy, classification, management)','Ulcers (classification, causes, management)','Sinuses (classification, causes, management)','Fistula (classification, causes, management)','Cysts (classification, causes, management)'] },
+    { t:'GIT Surgery', s:['History and examination of the abdomen','Gastrointestinal endoscopy','The peritoneum / mesentery / retroperitoneum','The esophagus','The stomach and duodenum','Bariatric and metabolic surgery','The liver','The spleen','The gall bladder','The bile ducts','The pancreas','The small intestine','Inflammatory and functional bowel disorders','The appendix','The large intestine','Intestinal obstruction','The rectum','The anus and anal canal'] },
+    { t:'ATLS Principles', s:['Primary survey','Secondary survey'] },
+    { t:'Breast', s:['Inflammatory disorders / anatomy','Nipple & areola diseases and discharge','Breast lumps / tumors'] },
+    { t:'Thyroid & Endocrine Surgery', s:['Thyroid anatomy and investigations','Hyperthyroidism and hypothyroidism','Inflammatory diseases of thyroid','Goitre / neck masses','Thyroid nodules (benign, malignant)','Post thyroid surgery emergencies','Parathyroid disorders','Adrenal disorders / surgery','Multiple endocrine neoplasias (MEN)'] },
+    { t:'Head & Neck', s:['Cervical lymphadenopathy','Salivary gland disorders','Congenital cysts / pharyngeal pouch'] },
+    { t:'Orthopedics', s:['Approach to patients with multiple traumas','Classification of fractures','Local and systemic complications of fractures','Shoulder fractures / dislocations','Humerus fractures / elbow dislocations','Radius and ulna fractures','Wrist and hand fractures','Spine fractures','Pelvic fractures','Hip and acetabulum fractures / dislocations','Femoral fractures','Knee joint dislocation','Tibia and fibula fractures','Ankle and foot injuries','Nerve injuries','Bone and joint infections (acute and chronic)','Genetic & metabolic bone disorders / neuromuscular disorders','Bone and joint tumors (benign, malignant)','Non-traumatic disorders of the shoulder','Non-traumatic disorders of the elbow, wrist and hand','Non-traumatic disorders of the hip','Non-traumatic disorders of the knee','Non-traumatic disorders of the ankle and foot','Non-traumatic disorders of the neck and spine'] },
+    { t:'Urology', s:['Urolithiasis','Uro-oncology','BPH / LUTS','Urinary tract infections and inflammation','Urology trauma / emergencies','Congenital anomalies of the urinary and genital tract','Male infertility','Erectile dysfunction','Benign scrotal conditions','Neurogenic bladder / urinary incontinence / instruments'] },
+    { t:'Cardiothoracic & Vascular Surgery', s:['Thoracic and vascular trauma / emergencies','Arterial disorders','Venous disorders','Lymphatic disorders / vascular tumors','Cardiothoracic anatomy / disorders / instruments'] },
+    { t:'Radiology', s:['Head and neck imaging','Chest imaging','Abdomino-pelvic imaging','Urinary tract imaging','Bones / joints imaging','Vascular & interventional radiology / safety'] },
+    { t:'Neurosurgery', s:['CNS trauma / intracranial bleeding / GCS calculation','Hydrocephalus / spina bifida','CNS infections / CNS tumors'] },
+    { t:'Anesthesia', s:['Anesthesia (types / indications / complications)','Principles of critical care in surgical patients'] },
+    { t:'Plastic & Reconstructive Surgery', s:['Burns and skin grafts','Benign & malignant skin lesions / bed sores / cleft lip and palate'] },
+    { t:'ENT', s:['ENT infections / emergencies and traumas','Audiology'] },
+    { t:'Ophthalmology', s:['Painful / red eye disorders','Deterioration of visual acuity / blurred vision'] },
+  ]},
+  { id:'gynae', name:'Gynaecology & Obstetrics', hue:330, topics:[
+    { t:'Basic & Normal Pregnancy', s:['Physiological changes in pregnancy','Anatomy and embryology'] },
+    { t:'Maternal Medicine', s:['Diabetes mellitus in pregnancy','Hypertensive disorders in pregnancy','Kidney disease and UTI in pregnancy','Heart disease in pregnancy','GIT problems in pregnancy','Bleeding disorders in pregnancy','Coagulation disorders in pregnancy','Anemia in pregnancy'] },
+    { t:'Foetal Medicine', s:['Rh isoimmunisation','Congenital & chromosomal abnormality','Intrauterine infection','IUGR & IUFD'] },
+    { t:'Birth & Labour', s:['Labor','Abnormal labor','Antepartum haemorrhage (APH)','Postpartum haemorrhage (PPH)','Malpresentation','Breech','Multiple pregnancy','Fetal heart monitoring','Induction of labour','Preterm labour & PROM','Prolonged pregnancy'] },
+    { t:'Postnatal Care', s:['Puerperium','Neonatal care'] },
+    { t:'Gynae Basic Science', s:['Physiology of female reproductive tract & menstrual cycle','Anatomy'] },
+    { t:'Intersex & Primary Amenorrhea', s:['Intersex','Genital tract congenital abnormalities','Primary amenorrhea'] },
+    { t:'Early Pregnancy Problems', s:['Ectopic pregnancy','Miscarriage','Gestational trophoblastic disease'] },
+    { t:'Menstruation', s:['Puberty','Abnormal uterine bleeding','Secondary amenorrhea','Endometriosis & adenomyosis','Contraception','PCOS, hirsutism & virilization','Menopause & postmenopausal bleeding'] },
+    { t:'Urogynecology', s:['Urinary incontinence','Pelvic organ prolapse'] },
+    { t:'Benign Conditions of Genital Tract', s:['Infection in gynecology / genital tract infection','Fibroid','Vulval & vaginal benign & premalignant conditions','Precancerous cervical lesion','Benign ovarian lesion','Endometrial hyperplasia'] },
+    { t:'Malignant Conditions of Genital Tract', s:['Ovarian malignancy','Uterine malignancy','Cervical malignancy','Vulval & vaginal malignancy'] },
+    { t:'Infertility', s:['Infertility (male & female causes, investigation & management)'] },
+  ]},
+  { id:'peds', name:'Pediatrics', hue:150, topics:[
+    { t:'Hematology', s:['Anemias (IDA, G6PD, thalassemia, hereditary spherocytosis, sickle cell)','Bleeding tendencies (ITP, hemophilia, Von Willebrand disease)','Leukemias and bone marrow failure (aplastic anemia)'] },
+    { t:'Neonatology', s:['Neonatal care and APGAR score assessment','Neonatal jaundice','Prematurity and RDS','Neonatal sepsis','Birth injury','Neonatal convulsion','TORCH infection'] },
+    { t:'GIT', s:['Infant feeding','Acute diarrhea (bloody and non-bloody GE)','Dehydration and ORS','Persistent & chronic diarrhea (celiac, post-infectious GE, toddler diarrhea)','Malnutrition / failure to thrive','Acute hepatitis and fulminant hepatic failure','Chronic liver disease'] },
+    { t:'CVS', s:['Cyanotic congenital heart disease (TOF, TGA)','Acyanotic congenital heart disease (VSD, ASD, PDA)','Acquired heart diseases (rheumatic heart disease, infective endocarditis)','Heart failure'] },
+    { t:'Respiratory System', s:['Asthma','Bronchiolitis','Pneumonia','Upper RTI (croup and epiglottitis)','Recurrent RTI (cystic fibrosis and bronchiectasis)'] },
+    { t:'Infectious Disease', s:['Tuberculosis','Exanthema (scarlet fever, measles, mumps, rubella, roseola)','Diphtheria','Pertussis','Tetanus','Kala azar','Varicella','Infectious mononucleosis','Pyrexia of unknown origin'] },
+    { t:'Nephrology', s:['Urinary tract infection','Acute renal failure','Nephrotic syndrome','Glomerulonephritis and hypertension in children','Hematuria and hemolytic uremic syndrome'] },
+    { t:'CNS', s:['CNS infections (meningitis, encephalitis)','Acute paralysis','Epilepsy / seizures and seizure mimics','Cerebral palsy'] },
+    { t:'Endocrine', s:['Rickets and parathyroid disease','Diabetes mellitus','Thyroid disease (hypothyroidism, hyperthyroidism)','Short stature'] },
+    { t:'Genetics', s:['Down and Turner syndromes','Types of inheritance'] },
+    { t:'Rheumatology', s:['Vasculitis (Henoch-Schonlein purpura and Kawasaki)','Connective tissue disease (juvenile rheumatoid arthritis and SLE)'] },
+    { t:'Immunization', s:['Vaccination schedule','Side effects of vaccine'] },
+    { t:'Growth & Development', s:['Growth and development milestones'] },
+    { t:'Others', s:['Pediatric emergencies (CPR, anaphylaxis, status epilepticus, FB inhalation, shock, sepsis)','Poisoning (kerosene, corrosives, button batteries, aspirin, iron, paracetamol, organophosphorus)','Child abuse','Autism','Immunodeficiency'] },
+  ]},
+];
+const CHECKS_KEY = 'sq_blueprint_checks_v1';
+function loadChecks(){ try{ return JSON.parse(localStorage.getItem(CHECKS_KEY)||'{}'); }catch(_){ return {}; } }
+function saveChecks(){ try{ localStorage.setItem(CHECKS_KEY, JSON.stringify(S.checks)); }catch(_){} }
+// All subtopic ids under a material / a topic — used for progress and "tick all".
+function matSubIds(m){ const ids=[]; m.topics.forEach((t,ti)=>t.s.forEach((_,si)=>ids.push(m.id+'.'+ti+'.'+si))); return ids; }
+function topicSubIds(mId,ti,t){ return t.s.map((_,si)=>mId+'.'+ti+'.'+si); }
+S.checks = loadChecks();   // restore ticks now that CHECKS_KEY is defined (avoids the const TDZ)
 
 /* ── data ── */
 function subjectsData(){
@@ -267,7 +348,23 @@ window.Q={
     setState({stage,screen:'dashboard',role:'guest',profile:null,answers:{},flags:{},qPos:0,authError:'',
       subjectId:'',lectureId:'',lectureName:'',
       dbSessions:[],dbUsers:[],dbQuestions:[],dbQuestionCount:0,selectedLectures:{},testScope:null,practiceError:''});
-    await DB.loadSubjectsAndLectures();
+    if(stage!==6) await DB.loadSubjectsAndLectures();   // 6th stage uses the blueprint checklist, not the DB
+  },
+  // ── 6th-stage blueprint checklist ──
+  toggleMatOpen(matId){ S.openMat[matId]=!S.openMat[matId]; setState({openMat:{...S.openMat}}); },
+  toggleTopicOpen(key){ S.openTopic[key]=!S.openTopic[key]; setState({openTopic:{...S.openTopic}}); },
+  toggleSub(id){ const c={...S.checks}; if(c[id]) delete c[id]; else c[id]=1; S.checks=c; saveChecks(); setState({checks:c}); },
+  toggleTopicAll(matId,ti){
+    const m=BLUEPRINT_6TH.find(x=>x.id===matId); if(!m)return;
+    const ids=topicSubIds(matId,ti,m.topics[ti]); const allOn=ids.every(id=>S.checks[id]);
+    const c={...S.checks}; ids.forEach(id=>{ if(allOn) delete c[id]; else c[id]=1; });
+    S.checks=c; saveChecks(); setState({checks:c});
+  },
+  toggleMatAll(matId){
+    const m=BLUEPRINT_6TH.find(x=>x.id===matId); if(!m)return;
+    const ids=matSubIds(m); const allOn=ids.every(id=>S.checks[id]);
+    const c={...S.checks}; ids.forEach(id=>{ if(allOn) delete c[id]; else c[id]=1; });
+    S.checks=c; saveChecks(); setState({checks:c});
   },
   async onLogout(){
     if(S.role!=='guest') await sb.auth.signOut();
@@ -756,6 +853,91 @@ document.addEventListener('keydown',e=>{
 
 /* ═══════════════════════════════ RENDER ═══════════════════════════════ */
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+
+function renderChecklist(){
+  const dark=S.theme==='dark';
+  const themeIcon=dark?'light_mode':'dark_mode';
+  let gTotal=0,gDone=0;
+  BLUEPRINT_6TH.forEach(m=>{const ids=matSubIds(m);gTotal+=ids.length;gDone+=ids.filter(id=>S.checks[id]).length;});
+  const gPct=gTotal?Math.round(gDone/gTotal*100):0;
+
+  // Tri-state tick box: full (all done), part (some done), empty.
+  const box=(state)=>{
+    const base='width:22px;height:22px;flex:none;border-radius:7px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .12s';
+    if(state==='full') return `<span style="${base};background:var(--green);border:1.5px solid var(--green)"><span class="ms" style="font-size:16px;color:#fff;font-variation-settings:'FILL' 1">check</span></span>`;
+    if(state==='part') return `<span style="${base};background:var(--blue-soft);border:1.5px solid var(--blue)"><span class="ms" style="font-size:15px;color:var(--blue)">remove</span></span>`;
+    return `<span style="${base};background:var(--surface);border:1.5px solid var(--border)"></span>`;
+  };
+
+  const materials = BLUEPRINT_6TH.map(m=>{
+    const t=tile(m.hue);
+    const matIds=matSubIds(m); const mDone=matIds.filter(id=>S.checks[id]).length; const mTot=matIds.length;
+    const mState=mDone===0?'empty':(mDone===mTot?'full':'part');
+    const mPct=mTot?Math.round(mDone/mTot*100):0;
+    const open=!!S.openMat[m.id];
+    const topicsHTML = open ? m.topics.map((tp,ti)=>{
+      const tIds=topicSubIds(m.id,ti,tp); const tDone=tIds.filter(id=>S.checks[id]).length; const tTot=tIds.length;
+      const tState=tDone===0?'empty':(tDone===tTot?'full':'part');
+      const key=m.id+'.'+ti; const topen=!!S.openTopic[key];
+      const subsHTML = topen ? tp.s.map((sub,si)=>{
+        const id=m.id+'.'+ti+'.'+si; const on=!!S.checks[id];
+        return `<label onclick="Q.toggleSub('${id}')" style="display:flex;align-items:center;gap:12px;padding:10px 16px 10px 30px;border-top:1px solid var(--border2);cursor:pointer">
+          ${box(on?'full':'empty')}
+          <span style="font-weight:500;font-size:13.5px;line-height:1.45;color:${on?'var(--faint)':'var(--text)'};text-decoration:${on?'line-through':'none'}">${esc(sub)}</span>
+        </label>`;
+      }).join('') : '';
+      return `<div style="border-top:1px solid var(--border)">
+        <div onclick="Q.toggleTopicOpen('${key}')" style="display:flex;align-items:center;gap:12px;padding:12px 16px 12px 18px;cursor:pointer;background:var(--surface2)">
+          <span onclick="event.stopPropagation();Q.toggleTopicAll('${m.id}',${ti})">${box(tState)}</span>
+          <span style="font-weight:700;font-size:14px;color:var(--text);flex:1;min-width:0">${esc(tp.t)}</span>
+          <span style="font-weight:600;font-size:12px;color:var(--muted)">${tDone}/${tTot}</span>
+          <span class="ms" style="font-size:20px;color:var(--faint)">${topen?'expand_less':'expand_more'}</span>
+        </div>
+        ${subsHTML}
+      </div>`;
+    }).join('') : '';
+    return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">
+      <div onclick="Q.toggleMatOpen('${m.id}')" style="display:flex;align-items:center;gap:14px;padding:16px 18px;cursor:pointer">
+        <div style="width:44px;height:44px;flex:none;border-radius:12px;background:${t.bg};color:${t.fg};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:17px">${esc(m.name[0])}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:800;font-size:16px;color:var(--text)">${esc(m.name)}</div>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:6px">
+            <div style="flex:1;max-width:220px;height:7px;border-radius:7px;background:var(--surface3);overflow:hidden"><div style="height:100%;width:${mPct}%;background:${t.fg}"></div></div>
+            <span style="font-weight:600;font-size:12px;color:var(--muted)">${mDone}/${mTot}</span>
+          </div>
+        </div>
+        <span onclick="event.stopPropagation();Q.toggleMatAll('${m.id}')" title="Tick all">${box(mState)}</span>
+        <span class="ms" style="font-size:24px;color:var(--faint)">${open?'expand_less':'expand_more'}</span>
+      </div>
+      ${topicsHTML}
+    </div>`;
+  }).join('');
+
+  return `
+  <div style="min-height:100vh;display:flex;flex-direction:column;background:var(--bg)">
+    <div class="app-header" style="height:60px;flex:none;display:flex;align-items:center;gap:14px;padding:0 20px;background:var(--surface);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:5">
+      <div style="display:flex;align-items:center;gap:11px">
+        <div style="width:30px;height:30px;border-radius:8px;padding:3px;background:linear-gradient(135deg,#3b82f6,#f3b827)"><div style="width:100%;height:100%;background:var(--surface);border-radius:5px"></div></div>
+        <div style="font-weight:800;font-size:17px;letter-spacing:-.5px;color:var(--text)">Square<span style="color:var(--yellow-ink)"> QBank</span></div>
+      </div>
+      <div style="font-weight:600;font-size:13px;color:var(--muted);padding:4px 10px;border-radius:20px;background:var(--surface2);border:1px solid var(--border)">6th Stage</div>
+      <div style="flex:1"></div>
+      <button onclick="Q.onToggleTheme()" style="width:38px;height:38px;border:1px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text);cursor:pointer;display:flex;align-items:center;justify-content:center"><span class="ms" style="font-size:20px">${themeIcon}</span></button>
+      <button onclick="Q.goStageSelect()" style="display:flex;align-items:center;gap:6px;height:38px;padding:0 13px;border:1px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text);font-weight:600;font-size:14px;cursor:pointer"><span class="ms" style="font-size:18px">swap_horiz</span><span class="rlabel">Change stage</span></button>
+    </div>
+    <div style="flex:1;overflow:auto;padding:30px 20px 80px">
+      <div style="max-width:880px;margin:0 auto;animation:fadeUp .35s ease both">
+        <h1 style="font-weight:800;font-size:26px;letter-spacing:-.7px;color:var(--text);margin:0 0 4px">Exam blueprint checklist</h1>
+        <p style="font-weight:500;font-size:14px;color:var(--muted);margin:0 0 20px">Track your revision across the four 6th-year materials. Open a material to reveal its core topics, then open a topic to tick its subtopics. Progress is saved on this device.</p>
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);padding:18px 20px;margin-bottom:20px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px"><span style="font-weight:700;font-size:14px;color:var(--text)">Overall progress</span><span style="font-weight:800;font-size:15px;color:var(--text)">${gPct}% · ${gDone}/${gTotal}</span></div>
+          <div style="height:9px;border-radius:9px;background:var(--surface3);overflow:hidden"><div style="height:100%;width:${gPct}%;background:linear-gradient(90deg,var(--blue),var(--yellow))"></div></div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:14px">${materials}</div>
+      </div>
+    </div>
+  </div>`;
+}
 
 function renderStage(){
   // Dark-on-light tile colours for the stage badges (independent of theme).
@@ -1681,6 +1863,7 @@ function render(){
 
   if(S.screen==='stage') root.innerHTML=renderStage();
   else if(S.screen==='login') root.innerHTML=renderLogin();
+  else if(S.stage===6 && S.role!=='admin') root.innerHTML=renderChecklist();   // 6th stage = blueprint checklist
   else if(S.screen==='solver') root.innerHTML=renderSolver();
   else root.innerHTML=renderApp();
 }
