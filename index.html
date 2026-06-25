@@ -102,9 +102,11 @@ const S = {
   showCreateModal:false, createError:'', createLoading:false,
   showBulkModal:false, bulkText:'', bulkResults:[], bulkLoading:false,
   dbAdminQuestions:[],           // admin: full question rows for management
-  adminQLecture:'', adminQSearch:'',
+  adminQSubject:'', adminQLecture:'', adminQSearch:'',
   showQEdit:false, editQ:null, qSaveError:'', qSaving:false,
   deleteQId:null, qDeleting:false,
+  showQAdd:false, addQ:null, qAddError:'', qAdding:false,   // admin: add new MCQ
+  showTopicModal:false, topicModal:null, topicError:'', topicSaving:false, // admin: rename/add topic & subtopic
 };
 
 let _timerInterval = null;
@@ -164,6 +166,22 @@ function questions(){
 
 /* ── helpers ── */
 function fmt(n){return (''+n).replace(/\B(?=(\d{3})+(?!\d))/g,',');}
+// slugify a name into a stable id; ensure it doesn't collide with existing ids.
+function slugId(name){return (name||'').toLowerCase().trim().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'').slice(0,40);}
+function uniqueId(base,existing){let id=base||('id_'+Date.now().toString(36));if(!existing.includes(id))return id;let n=2;while(existing.includes(id+'_'+n))n++;return id+'_'+n;}
+// read the live values out of an MCQ add/edit form (prefix 'eq' or 'aq') so a
+// re-render (e.g. switching topic) never loses what the admin has typed.
+function readQForm(prefix){
+  const g=id=>document.getElementById(id);
+  const opts=['a','b','c','d','e'].map(L=>g(prefix+'-opt-'+L)?.value??'');
+  return {
+    stem:g(prefix+'-stem')?.value??'',
+    option_a:opts[0],option_b:opts[1],option_c:opts[2],option_d:opts[3],option_e:opts[4],
+    answer:parseInt(g(prefix+'-answer')?.value||'0'),
+    tag:g(prefix+'-tag')?.value??'',
+    explanation:g(prefix+'-expl')?.value??'',
+  };
+}
 function tile(hue){
   return S.theme==='dark'
     ?{bg:'oklch(0.30 0.055 '+hue+')',fg:'oklch(0.80 0.12 '+hue+')'}
@@ -298,30 +316,81 @@ window.Q={
   prev(){setState(s=>({qPos:Math.max(0,s.qPos-1)}));},
   setQPos(i){setState({qPos:i});},
   onFlag(){const q=curQ();const f={...S.flags};f[q.id]=!f[q.id];setState({flags:f});DB.toggleFlag(q.id);},
-  setAdminTab(k){setState({adminTab:k}); if(k==='questions') DB.loadAdminQuestions();},
+  setAdminTab(k){setState({adminTab:k}); if(k==='questions'||k==='topics') DB.loadAdminQuestions();},
+  setAdminQSubject(v){setState({adminQSubject:v,adminQLecture:''});},
   setAdminQLecture(v){setState({adminQLecture:v});},
   onAdminQSearch(v){setState({adminQSearch:v});},
   openQEdit(id){const q=S.dbAdminQuestions.find(x=>x.id===id)||S.dbQuestions.find(x=>x.id===id); if(!q)return; setState({showQEdit:true,editQ:{...q},qSaveError:'',qSaving:false});},
   closeQEdit(){setState({showQEdit:false,editQ:null,qSaveError:'',qSaving:false});},
+  // Switching the Topic re-scopes the Subtopic list, so snapshot typed values first
+  // and snap the subtopic to the first one under the newly chosen topic.
+  onEditSubject(v){const lecs=S.dbLectures.filter(l=>l.subject_id===v);setState({editQ:{...S.editQ,...readQForm('eq'),subject_id:v,lecture_id:lecs[0]?lecs[0].id:''}});},
+  onEditLecture(v){setState({editQ:{...S.editQ,...readQForm('eq'),lecture_id:v}});},
   async onSaveQuestion(){
-    const g=id=>document.getElementById(id);
-    const stem=(g('eq-stem')?.value||'').trim();
-    const opts=['a','b','c','d','e'].map(L=>g('eq-opt-'+L)?.value||'');
-    const answer=parseInt(g('eq-answer')?.value||'0');
-    const tag=(g('eq-tag')?.value||'').trim();
-    const explanation=(g('eq-expl')?.value||'').trim();
+    const f=readQForm('eq');
+    const stem=f.stem.trim(), tag=f.tag.trim(), explanation=f.explanation.trim();
+    const opts=[f.option_a,f.option_b,f.option_c,f.option_d,f.option_e];
     // keep what the admin typed so a validation error doesn't wipe edits on re-render
-    const draft={...S.editQ, stem, option_a:opts[0],option_b:opts[1],option_c:opts[2],option_d:opts[3],option_e:opts[4], answer, tag, explanation};
+    const draft={...S.editQ, ...f};
+    if(!S.editQ.subject_id||!S.editQ.lecture_id){setState({editQ:draft,qSaveError:'Pick a topic and a subtopic.'});return;}
     if(!stem){setState({editQ:draft,qSaveError:'Question stem cannot be empty.'});return;}
     if(!opts[0].trim()||!opts[1].trim()){setState({editQ:draft,qSaveError:'Options A and B are required.'});return;}
-    if((opts[answer]||'').trim()===''){setState({editQ:draft,qSaveError:'The selected correct answer points to an empty option.'});return;}
+    if((opts[f.answer]||'').trim()===''){setState({editQ:draft,qSaveError:'The selected correct answer points to an empty option.'});return;}
     setState({editQ:draft,qSaving:true,qSaveError:''});
     const res=await DB.updateQuestion(S.editQ.id,{
+      subject_id:S.editQ.subject_id, lecture_id:S.editQ.lecture_id,
       stem, option_a:opts[0],option_b:opts[1],option_c:opts[2],option_d:opts[3],option_e:opts[4],
-      answer, tag:tag||null, explanation:explanation||null,
+      answer:f.answer, tag:tag||null, explanation:explanation||null,
     });
     if(res.error){setState({qSaving:false,qSaveError:res.error});return;}
     setState({showQEdit:false,editQ:null,qSaving:false,qSaveError:''});
+  },
+  // ── add a brand-new MCQ ──
+  openQAdd(){
+    const sub=S.adminQSubject||(S.dbSubjects[0]?.id||'');
+    const lecs=S.dbLectures.filter(l=>l.subject_id===sub);
+    const lec=(S.adminQLecture&&lecs.some(l=>l.id===S.adminQLecture))?S.adminQLecture:(lecs[0]?lecs[0].id:'');
+    setState({showQAdd:true,qAddError:'',qAdding:false,
+      addQ:{subject_id:sub,lecture_id:lec,stem:'',option_a:'',option_b:'',option_c:'',option_d:'',option_e:'',answer:0,tag:'',explanation:''}});
+  },
+  closeQAdd(){setState({showQAdd:false,addQ:null,qAddError:'',qAdding:false});},
+  onAddSubject(v){const lecs=S.dbLectures.filter(l=>l.subject_id===v);setState({addQ:{...S.addQ,...readQForm('aq'),subject_id:v,lecture_id:lecs[0]?lecs[0].id:''}});},
+  onAddLecture(v){setState({addQ:{...S.addQ,...readQForm('aq'),lecture_id:v}});},
+  async onSaveNewQuestion(){
+    const f=readQForm('aq');
+    const stem=f.stem.trim(), tag=f.tag.trim(), explanation=f.explanation.trim();
+    const opts=[f.option_a,f.option_b,f.option_c,f.option_d,f.option_e];
+    const draft={...S.addQ,...f};
+    if(!draft.subject_id||!draft.lecture_id){setState({addQ:draft,qAddError:'Pick a topic and a subtopic.'});return;}
+    if(!stem){setState({addQ:draft,qAddError:'Question stem cannot be empty.'});return;}
+    if(!opts[0].trim()||!opts[1].trim()){setState({addQ:draft,qAddError:'Options A and B are required.'});return;}
+    if((opts[f.answer]||'').trim()===''){setState({addQ:draft,qAddError:'The selected correct answer points to an empty option.'});return;}
+    setState({addQ:draft,qAdding:true,qAddError:''});
+    const res=await DB.createQuestion({
+      subject_id:draft.subject_id, lecture_id:draft.lecture_id,
+      stem, option_a:opts[0],option_b:opts[1],option_c:opts[2],option_d:opts[3],option_e:opts[4],
+      answer:f.answer, tag:tag||null, explanation:explanation||null,
+    });
+    if(res.error){setState({qAdding:false,qAddError:res.error});return;}
+    // focus the new question's topic in the filter so the admin sees it land
+    setState({showQAdd:false,addQ:null,qAdding:false,qAddError:'',adminQSubject:draft.subject_id,adminQLecture:draft.lecture_id});
+  },
+  // ── rename / add topics (subjects) & subtopics (lectures) ──
+  openRenameTopic(id){const s=S.dbSubjects.find(x=>x.id===id);if(!s)return;setState({showTopicModal:true,topicModal:{kind:'subject',mode:'rename',id,name:s.name},topicError:'',topicSaving:false});},
+  openAddTopic(){setState({showTopicModal:true,topicModal:{kind:'subject',mode:'add',name:''},topicError:'',topicSaving:false});},
+  openRenameSubtopic(id){const l=S.dbLectures.find(x=>x.id===id);if(!l)return;setState({showTopicModal:true,topicModal:{kind:'lecture',mode:'rename',id,name:l.name},topicError:'',topicSaving:false});},
+  openAddSubtopic(subjectId){setState({showTopicModal:true,topicModal:{kind:'lecture',mode:'add',parentSubjectId:subjectId,name:''},topicError:'',topicSaving:false});},
+  closeTopicModal(){setState({showTopicModal:false,topicModal:null,topicError:'',topicSaving:false});},
+  async onSaveTopic(){
+    const name=(document.getElementById('topic-name')?.value||'').trim();
+    const m=S.topicModal; if(!m)return;
+    if(!name){setState({topicError:'Name cannot be empty.'});return;}
+    setState({topicSaving:true,topicError:''});
+    let res;
+    if(m.kind==='subject')      res=await (m.mode==='rename'?DB.renameSubject(m.id,name):DB.addSubject(name));
+    else                        res=await (m.mode==='rename'?DB.renameLecture(m.id,name):DB.addLecture(m.parentSubjectId,name));
+    if(res?.error){setState({topicSaving:false,topicError:res.error});return;}
+    setState({showTopicModal:false,topicModal:null,topicSaving:false,topicError:''});
   },
   askDeleteQuestion(id){setState({deleteQId:id,qDeleting:false});},
   cancelDeleteQuestion(){setState({deleteQId:null,qDeleting:false});},
@@ -462,6 +531,49 @@ const DB = {
     const patched=S.dbQuestions.map(q=>q.id===id?{...q,...fields}:q);
     setState({dbQuestions:patched});
     await Promise.allSettled([DB.loadAdminQuestions(), DB.loadQuestionCount()]);
+    return {};
+  },
+
+  async createQuestion(fields){
+    const {error} = await sb.from('questions').insert({
+      ...fields, is_active:true, created_by:S.profile?.id||null,
+    });
+    if(error) return {error: error.message};
+    await Promise.allSettled([DB.loadAdminQuestions(), DB.loadQuestionCount()]);
+    return {};
+  },
+
+  async renameSubject(id, name){
+    const {error} = await sb.from('subjects').update({name}).eq('id', id);
+    if(error) return {error: error.message};
+    await DB.loadSubjectsAndLectures();
+    return {};
+  },
+
+  async addSubject(name){
+    const id = uniqueId(slugId(name), S.dbSubjects.map(s=>s.id));
+    const maxSort = S.dbSubjects.reduce((m,s)=>Math.max(m,s.sort_order||0), 0);
+    const {error} = await sb.from('subjects').insert({id, name, hue:255, sort_order:maxSort+1, is_active:true});
+    if(error) return {error: error.message};
+    await DB.loadSubjectsAndLectures();
+    return {};
+  },
+
+  async renameLecture(id, name){
+    const {error} = await sb.from('lectures').update({name}).eq('id', id);
+    if(error) return {error: error.message};
+    await DB.loadSubjectsAndLectures();
+    return {};
+  },
+
+  async addLecture(subjectId, name){
+    if(!subjectId) return {error:'No topic selected.'};
+    const id = uniqueId(slugId(name), S.dbLectures.map(l=>l.id));
+    const sibs = S.dbLectures.filter(l=>l.subject_id===subjectId);
+    const maxSort = sibs.reduce((m,l)=>Math.max(m,l.sort_order||0), 0);
+    const {error} = await sb.from('lectures').insert({id, subject_id:subjectId, name, sort_order:maxSort+1, is_active:true});
+    if(error) return {error: error.message};
+    await DB.loadSubjectsAndLectures();
     return {};
   },
 
@@ -682,7 +794,7 @@ function renderLogin(){
 
 // Admin question edit + delete modals — shared by the Admin tab and the solver/review screen.
 function renderQEditModals(){
-  if(!(S.showQEdit && S.editQ) && !S.deleteQId) return '';
+  if(!(S.showQEdit && S.editQ) && !S.deleteQId && !(S.showQAdd && S.addQ)) return '';
   const modalOverlay=`position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;display:flex;align-items:center;justify-content:center;padding:16px`;
   const modalBox=`background:var(--surface);border-radius:20px;box-shadow:var(--shadow-lg);width:100%;max-width:460px;padding:28px;position:relative`;
   const lblCss=`font-weight:600;font-size:12.5px;color:var(--muted);display:block;margin-bottom:5px`;
@@ -690,31 +802,68 @@ function renderQEditModals(){
   const taCss=`width:100%;border:1.5px solid var(--border);border-radius:10px;padding:10px 12px;font-size:14px;background:var(--surface2);color:var(--text);outline:none;resize:vertical;font-family:Figtree;line-height:1.6`;
   const letters=['A','B','C','D','E'];
 
+  // Shared field set for both the Edit and Add modals. `prefix` namespaces the
+  // input ids ('eq' = edit, 'aq' = add) so readQForm() can snapshot the right form.
+  // The Topic select re-scopes the Subtopic select, hence the onchange handlers.
+  const formFields=(prefix,q)=>{
+    const subjH=prefix==='eq'?'Q.onEditSubject':'Q.onAddSubject';
+    const lecH =prefix==='eq'?'Q.onEditLecture':'Q.onAddLecture';
+    const subOpts=S.dbSubjects.slice().sort((a,b)=>(a.sort_order||0)-(b.sort_order||0))
+      .map(s=>`<option value="${s.id}"${q.subject_id===s.id?' selected':''}>${esc(s.name)}</option>`).join('');
+    const lecRows=S.dbLectures.filter(l=>l.subject_id===q.subject_id).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0));
+    const lecOpts=lecRows.map(l=>`<option value="${l.id}"${q.lecture_id===l.id?' selected':''}>${esc(l.name)}</option>`).join('')
+      ||`<option value="">No subtopics yet</option>`;
+    return `
+      <div style="display:flex;gap:10px">
+        <div style="flex:1;min-width:0"><label style="${lblCss}">Topic</label>
+          <select id="${prefix}-subject" onchange="${subjH}(this.value)" style="${inCss}">${subOpts}</select></div>
+        <div style="flex:1;min-width:0"><label style="${lblCss}">Subtopic</label>
+          <select id="${prefix}-lecture" onchange="${lecH}(this.value)" style="${inCss}">${lecOpts}</select></div>
+      </div>
+      <div><label style="${lblCss}">Question stem</label>
+        <textarea id="${prefix}-stem" rows="3" style="${taCss}">${esc(q.stem||'')}</textarea></div>
+      ${letters.map((L,i)=>`<div><label style="${lblCss}">Option ${L}${i>1?' <span style="color:var(--faint);font-weight:500">(optional)</span>':''}</label>
+        <input id="${prefix}-opt-${L.toLowerCase()}" value="${esc(q['option_'+L.toLowerCase()]||'')}" style="${inCss}"></div>`).join('')}
+      <div><label style="${lblCss}">Correct answer</label>
+        <select id="${prefix}-answer" style="${inCss}">
+          ${letters.map((L,i)=>`<option value="${i}"${q.answer===i?' selected':''}>Option ${L}</option>`).join('')}
+        </select></div>
+      <div><label style="${lblCss}">Tag / sub-label <span style="color:var(--faint);font-weight:500">(optional)</span></label>
+        <input id="${prefix}-tag" value="${esc(q.tag||'')}" style="${inCss}"></div>
+      <div><label style="${lblCss}">Explanation</label>
+        <textarea id="${prefix}-expl" rows="4" style="${taCss}">${esc(q.explanation||'')}</textarea></div>`;
+  };
+
+  // The form is tall, so scroll the whole overlay (anchored to top) rather than an
+  // internal fixed-height box — internal scrolling gets clipped/captured on mobile viewports.
+  const editOverlay=`position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;display:flex;align-items:flex-start;justify-content:center;padding:16px;overflow-y:auto;-webkit-overflow-scrolling:touch`;
   const eq=S.editQ;
-  const qEditModalHTML=(S.showQEdit&&eq)?`<div style="${modalOverlay}" onclick="if(event.target===this)Q.closeQEdit()">
-    <div style="${modalBox};max-width:600px;max-height:90vh;overflow-y:auto">
+  const qEditModalHTML=(S.showQEdit&&eq)?`<div style="${editOverlay}" onclick="if(event.target===this)Q.closeQEdit()">
+    <div style="${modalBox};max-width:600px;margin:auto">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
         <div style="font-weight:800;font-size:18px;color:var(--text)">Edit question</div>
         <span class="ms" onclick="Q.closeQEdit()" style="font-size:22px;color:var(--faint);cursor:pointer">close</span>
       </div>
       ${S.qSaveError?`<div style="background:var(--red-soft);color:var(--red);border-radius:10px;padding:10px 14px;font-weight:600;font-size:13px;margin-bottom:14px">${esc(S.qSaveError)}</div>`:''}
-      <div style="display:flex;flex-direction:column;gap:13px">
-        <div><label style="${lblCss}">Question stem</label>
-          <textarea id="eq-stem" rows="3" style="${taCss}">${esc(eq.stem||'')}</textarea></div>
-        ${letters.map((L,i)=>`<div><label style="${lblCss}">Option ${L}${i>1?' <span style="color:var(--faint);font-weight:500">(optional)</span>':''}</label>
-          <input id="eq-opt-${L.toLowerCase()}" value="${esc(eq['option_'+L.toLowerCase()]||'')}" style="${inCss}"></div>`).join('')}
-        <div><label style="${lblCss}">Correct answer</label>
-          <select id="eq-answer" style="${inCss}">
-            ${letters.map((L,i)=>`<option value="${i}"${eq.answer===i?' selected':''}>Option ${L}</option>`).join('')}
-          </select></div>
-        <div><label style="${lblCss}">Subtopic / tag</label>
-          <input id="eq-tag" value="${esc(eq.tag||'')}" style="${inCss}"></div>
-        <div><label style="${lblCss}">Explanation</label>
-          <textarea id="eq-expl" rows="4" style="${taCss}">${esc(eq.explanation||'')}</textarea></div>
-      </div>
+      <div style="display:flex;flex-direction:column;gap:13px">${formFields('eq',eq)}</div>
       <div style="display:flex;gap:10px;margin-top:20px">
         <button onclick="Q.closeQEdit()" style="flex:1;height:46px;border:1.5px solid var(--border);border-radius:12px;background:var(--surface);color:var(--text);font-weight:700;font-size:14px;cursor:pointer">Cancel</button>
         <button onclick="Q.onSaveQuestion()" style="flex:2;height:46px;border:none;border-radius:12px;background:var(--blue);color:#fff;font-weight:700;font-size:14px;cursor:pointer;opacity:${S.qSaving?.6:1}">${S.qSaving?'Saving…':'Save changes'}</button>
+      </div>
+    </div></div>`:'';
+
+  const aq=S.addQ;
+  const qAddModalHTML=(S.showQAdd&&aq)?`<div style="${editOverlay}" onclick="if(event.target===this)Q.closeQAdd()">
+    <div style="${modalBox};max-width:600px;margin:auto">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
+        <div style="font-weight:800;font-size:18px;color:var(--text)">New question</div>
+        <span class="ms" onclick="Q.closeQAdd()" style="font-size:22px;color:var(--faint);cursor:pointer">close</span>
+      </div>
+      ${S.qAddError?`<div style="background:var(--red-soft);color:var(--red);border-radius:10px;padding:10px 14px;font-weight:600;font-size:13px;margin-bottom:14px">${esc(S.qAddError)}</div>`:''}
+      <div style="display:flex;flex-direction:column;gap:13px">${formFields('aq',aq)}</div>
+      <div style="display:flex;gap:10px;margin-top:20px">
+        <button onclick="Q.closeQAdd()" style="flex:1;height:46px;border:1.5px solid var(--border);border-radius:12px;background:var(--surface);color:var(--text);font-weight:700;font-size:14px;cursor:pointer">Cancel</button>
+        <button onclick="Q.onSaveNewQuestion()" style="flex:2;height:46px;border:none;border-radius:12px;background:var(--blue);color:#fff;font-weight:700;font-size:14px;cursor:pointer;opacity:${S.qAdding?.6:1}">${S.qAdding?'Adding…':'Add question'}</button>
       </div>
     </div></div>`:'';
 
@@ -733,7 +882,7 @@ function renderQEditModals(){
       </div>
     </div></div>`:'';
 
-  return qEditModalHTML+qDeleteModalHTML;
+  return qEditModalHTML+qAddModalHTML+qDeleteModalHTML;
 }
 
 function renderSolver(){
@@ -1159,11 +1308,11 @@ function renderApp(){
   else if(scr==='admin'){
     const adminStats=[
       {icon:'group',color:'var(--blue)',label:'Total students',value:fmt(S.dbUsers.length)},
-      {icon:'menu_book',color:'var(--green)',label:'Subjects',value:fmt(S.dbSubjects.length)},
-      {icon:'list_alt',color:'var(--yellow-ink)',label:'Lectures',value:fmt(S.dbLectures.length)},
+      {icon:'menu_book',color:'var(--green)',label:'Topics',value:fmt(S.dbSubjects.length)},
+      {icon:'list_alt',color:'var(--yellow-ink)',label:'Subtopics',value:fmt(S.dbLectures.length)},
       {icon:'quiz',color:'var(--blue)',label:'Total MCQs',value:fmt(S.dbQuestionCount)},
     ];
-    const tabs=[['users','Students'],['questions','Questions']];
+    const tabs=[['users','Students'],['questions','Questions'],['topics','Topics']];
 
     // modals (rendered outside main flow, overlaid)
     const modalOverlay=`position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;display:flex;align-items:center;justify-content:center;padding:16px`;
@@ -1249,15 +1398,16 @@ function renderApp(){
               </div>`;}).join('')}
         </div></div>
       </div>`;
-    } else {
+    } else if(S.adminTab==='questions'){
       const letters=['A','B','C','D','E'];
       const lecName=id=>{const l=S.dbLectures.find(x=>x.id===id);return l?l.name:id;};
       const subjName=id=>{const s=S.dbSubjects.find(x=>x.id===id);return s?s.name:'';};
 
       let list=S.dbAdminQuestions.slice();
+      if(S.adminQSubject) list=list.filter(q=>q.subject_id===S.adminQSubject);
       if(S.adminQLecture) list=list.filter(q=>q.lecture_id===S.adminQLecture);
       const term=(S.adminQSearch||'').trim().toLowerCase();
-      if(term) list=list.filter(q=>((q.stem||'')+' '+(q.tag||'')).toLowerCase().includes(term));
+      if(term) list=list.filter(q=>[q.stem,q.tag,q.option_a,q.option_b,q.option_c,q.option_d,q.option_e,q.explanation].map(x=>x||'').join(' ').toLowerCase().includes(term));
 
       const rows=list.length?list.map(q=>{
         const optTexts=[q.option_a,q.option_b,q.option_c,q.option_d,q.option_e];
@@ -1278,24 +1428,95 @@ function renderApp(){
         </div>`;
       }).join(''):`<div style="padding:48px;text-align:center;color:var(--muted);font-weight:500;font-size:14px"><span class="ms" style="font-size:36px;display:block;margin-bottom:8px">quiz</span>${S.dbQuestionCount?'No questions match your filter.':'No questions in the bank yet.'}</div>`;
 
-      const lectureOptions=S.dbLectures.slice().sort((a,b)=>(a.sort_order||0)-(b.sort_order||0))
-        .map(l=>`<option value="${l.id}"${S.adminQLecture===l.id?' selected':''}>${esc(subjName(l.subject_id))} — ${esc(l.name)}</option>`).join('');
+      const subjectOptions=S.dbSubjects.slice().sort((a,b)=>(a.sort_order||0)-(b.sort_order||0))
+        .map(s=>`<option value="${s.id}"${S.adminQSubject===s.id?' selected':''}>${esc(s.name)}</option>`).join('');
+      // Subtopic list is scoped to the chosen topic; empty until a topic is picked.
+      const lectureOptions=S.dbLectures.slice()
+        .filter(l=>S.adminQSubject&&l.subject_id===S.adminQSubject)
+        .sort((a,b)=>(a.sort_order||0)-(b.sort_order||0))
+        .map(l=>`<option value="${l.id}"${S.adminQLecture===l.id?' selected':''}>${esc(l.name)}</option>`).join('');
 
       tabContent=`${renderQEditModals()}<div style="background:var(--surface);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow);overflow:hidden">
         <div style="display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid var(--border);flex-wrap:wrap">
           <span style="font-weight:700;font-size:15px;color:var(--text)">Question bank</span>
           <span style="font-weight:500;font-size:12.5px;color:var(--muted)">${fmt(list.length)} shown · ${fmt(S.dbQuestionCount)} total</span>
           <div style="flex:1"></div>
-          <select onchange="Q.setAdminQLecture(this.value)" style="height:38px;border:1.5px solid var(--border);border-radius:9px;padding:0 10px;font-size:13px;background:var(--surface2);color:var(--text);outline:none;max-width:240px;font-family:Figtree">
-            <option value="">All lectures</option>${lectureOptions}
+          <select onchange="Q.setAdminQSubject(this.value)" style="height:38px;border:1.5px solid var(--border);border-radius:9px;padding:0 10px;font-size:13px;background:var(--surface2);color:var(--text);outline:none;max-width:200px;font-family:Figtree">
+            <option value="">All topics</option>${subjectOptions}
           </select>
-          <div style="display:flex;align-items:center;gap:7px;height:38px;padding:0 12px;border:1.5px solid var(--border);border-radius:9px;background:var(--surface2);width:220px;max-width:40vw">
+          <select onchange="Q.setAdminQLecture(this.value)"${S.adminQSubject?'':' disabled'} style="height:38px;border:1.5px solid var(--border);border-radius:9px;padding:0 10px;font-size:13px;background:var(--surface2);color:var(--text);outline:none;max-width:220px;font-family:Figtree;opacity:${S.adminQSubject?1:.55}">
+            <option value="">${S.adminQSubject?'All subtopics':'Pick a topic first'}</option>${lectureOptions}
+          </select>
+          <div style="display:flex;align-items:center;gap:7px;height:38px;padding:0 12px;border:1.5px solid var(--border);border-radius:9px;background:var(--surface2);width:200px;max-width:36vw">
             <span class="ms" style="font-size:18px;color:var(--faint)">search</span>
             <input value="${esc(S.adminQSearch||'')}" onchange="Q.onAdminQSearch(this.value)" placeholder="Search, then Enter…" style="border:none;background:transparent;outline:none;font-weight:500;font-size:13px;color:var(--text);flex:1;min-width:0;font-family:Figtree">
           </div>
+          <button onclick="Q.openQAdd()" style="display:flex;align-items:center;gap:7px;height:38px;padding:0 16px;border:none;border-radius:9px;background:var(--blue);color:#fff;font-weight:700;font-size:13.5px;cursor:pointer;white-space:nowrap"><span class="ms" style="font-size:19px">add</span>New question</button>
         </div>
         <div style="max-height:62vh;overflow-y:auto">${rows}</div>
       </div>`;
+    } else if(S.adminTab==='topics'){
+      // Topics (subjects) → Subtopics (lectures). Rename in place or add new ones.
+      const qCountBySubject={}, qCountByLecture={};
+      S.dbAdminQuestions.forEach(q=>{qCountBySubject[q.subject_id]=(qCountBySubject[q.subject_id]||0)+1;qCountByLecture[q.lecture_id]=(qCountByLecture[q.lecture_id]||0)+1;});
+      const subjects=S.dbSubjects.slice().sort((a,b)=>(a.sort_order||0)-(b.sort_order||0));
+      const miniBtn=`height:30px;padding:0 11px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font-weight:700;font-size:12.5px;cursor:pointer;display:inline-flex;align-items:center;gap:5px`;
+
+      const topicModalHTML=(S.showTopicModal&&S.topicModal)?(()=>{
+        const m=S.topicModal;
+        const noun=m.kind==='subject'?'topic':'subtopic';
+        const title=(m.mode==='rename'?'Rename ':'Add ')+noun;
+        const parent=m.kind==='lecture'&&m.parentSubjectId?(S.dbSubjects.find(s=>s.id===m.parentSubjectId)||{}).name:'';
+        return `<div style="${modalOverlay}" onclick="if(event.target===this)Q.closeTopicModal()">
+          <div style="${modalBox};max-width:430px">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
+              <div style="font-weight:800;font-size:18px;color:var(--text)">${title}</div>
+              <span class="ms" onclick="Q.closeTopicModal()" style="font-size:22px;color:var(--faint);cursor:pointer">close</span>
+            </div>
+            ${S.topicError?`<div style="background:var(--red-soft);color:var(--red);border-radius:10px;padding:10px 14px;font-weight:600;font-size:13px;margin-bottom:14px">${esc(S.topicError)}</div>`:''}
+            ${parent?`<div style="font-weight:500;font-size:12.5px;color:var(--muted);margin-bottom:8px">Under <span style="color:var(--text);font-weight:700">${esc(parent)}</span></div>`:''}
+            <label style="${lblCss}">${m.kind==='subject'?'Topic':'Subtopic'} name</label>
+            <input id="topic-name" value="${esc(m.name||'')}" placeholder="${m.kind==='subject'?'e.g. Surgery':'e.g. Cardiology'}" style="${inCss}" onkeydown="if(event.key==='Enter')Q.onSaveTopic()">
+            <div style="display:flex;gap:10px;margin-top:20px">
+              <button onclick="Q.closeTopicModal()" style="flex:1;height:46px;border:1.5px solid var(--border);border-radius:12px;background:var(--surface);color:var(--text);font-weight:700;font-size:14px;cursor:pointer">Cancel</button>
+              <button onclick="Q.onSaveTopic()" style="flex:2;height:46px;border:none;border-radius:12px;background:var(--blue);color:#fff;font-weight:700;font-size:14px;cursor:pointer;opacity:${S.topicSaving?.6:1}">${S.topicSaving?'Saving…':(m.mode==='rename'?'Save':'Add')}</button>
+            </div>
+          </div></div>`;
+      })():'';
+
+      const subjectCards=subjects.length?subjects.map(s=>{
+        const lecs=S.dbLectures.filter(l=>l.subject_id===s.id).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0));
+        const t=tile(s.hue||255);
+        const lecRows=lecs.length?lecs.map(l=>`<div style="display:flex;align-items:center;gap:10px;padding:10px 16px 10px 20px;border-top:1px solid var(--border2)">
+            <span class="ms" style="font-size:16px;color:var(--faint)">subdirectory_arrow_right</span>
+            <span style="font-weight:600;font-size:13.5px;color:var(--text)">${esc(l.name)}</span>
+            <span style="font-weight:500;font-size:11.5px;color:var(--muted)">${fmt(qCountByLecture[l.id]||0)} MCQ${(qCountByLecture[l.id]||0)===1?'':'s'}</span>
+            <div style="flex:1"></div>
+            <button onclick="Q.openRenameSubtopic('${l.id}')" style="${miniBtn}"><span class="ms" style="font-size:15px">edit</span>Rename</button>
+          </div>`).join(''):`<div style="padding:12px 20px;border-top:1px solid var(--border2);font-weight:500;font-size:12.5px;color:var(--muted)">No subtopics yet.</div>`;
+        return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">
+          <div style="display:flex;align-items:center;gap:12px;padding:14px 16px 14px 20px">
+            <div style="width:34px;height:34px;border-radius:9px;background:${t.bg};color:${t.fg};display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px;flex:none">${esc((s.name[0]||'?').toUpperCase())}</div>
+            <div style="min-width:0">
+              <div style="font-weight:800;font-size:15px;color:var(--text)">${esc(s.name)}</div>
+              <div style="font-weight:500;font-size:11.5px;color:var(--muted)">${lecs.length} subtopic${lecs.length===1?'':'s'} · ${fmt(qCountBySubject[s.id]||0)} MCQs</div>
+            </div>
+            <div style="flex:1"></div>
+            <button onclick="Q.openRenameTopic('${s.id}')" style="${miniBtn}"><span class="ms" style="font-size:15px">edit</span>Rename</button>
+            <button onclick="Q.openAddSubtopic('${s.id}')" style="${miniBtn};border-color:var(--blue);color:var(--blue)"><span class="ms" style="font-size:15px">add</span>Subtopic</button>
+          </div>
+          ${lecRows}
+        </div>`;
+      }).join(''):`<div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:48px;text-align:center;color:var(--muted);font-weight:500;font-size:14px"><span class="ms" style="font-size:36px;display:block;margin-bottom:8px">category</span>No topics yet — click "New topic" to add one.</div>`;
+
+      tabContent=`${topicModalHTML}
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+          <span style="font-weight:700;font-size:15px;color:var(--text)">Topics &amp; subtopics</span>
+          <span style="font-weight:500;font-size:12.5px;color:var(--muted)">${fmt(subjects.length)} topics · ${fmt(S.dbLectures.length)} subtopics</span>
+          <div style="flex:1"></div>
+          <button onclick="Q.openAddTopic()" style="display:flex;align-items:center;gap:7px;height:40px;padding:0 16px;border:none;border-radius:10px;background:var(--blue);color:#fff;font-weight:700;font-size:13.5px;cursor:pointer"><span class="ms" style="font-size:19px">add</span>New topic</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:14px">${subjectCards}</div>`;
     }
 
     pageHTML=`
