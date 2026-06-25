@@ -108,7 +108,11 @@ const S = {
   deleteQId:null, qDeleting:false,
   showQAdd:false, addQ:null, qAddError:'', qAdding:false,   // admin: add new MCQ
   showTopicModal:false, topicModal:null, topicError:'', topicSaving:false, // admin: rename/add topic & subtopic
-  checks:{}, openMat:{}, openTopic:{},   // 6th-stage blueprint checklist (localStorage-backed)
+  // 6th-stage blueprint checklist (localStorage-backed). Ticks are tracked per
+  // "pass" (a main Study pass + any number of Revision passes). Open sections
+  // and the active pass are persisted too, so returning resumes the view.
+  passes:[{id:'study',name:'Study',type:'study'}], activePass:'study',
+  checks:{study:{}}, openMat:{}, openTopic:{},
 };
 
 let _timerInterval = null;
@@ -185,13 +189,18 @@ const BLUEPRINT_6TH = [
     { t:'Others', s:['Pediatric emergencies (CPR, anaphylaxis, status epilepticus, FB inhalation, shock, sepsis)','Poisoning (kerosene, corrosives, button batteries, aspirin, iron, paracetamol, organophosphorus)','Child abuse','Autism','Immunodeficiency'] },
   ]},
 ];
-const CHECKS_KEY = 'sq_blueprint_checks_v1';
-function loadChecks(){ try{ return JSON.parse(localStorage.getItem(CHECKS_KEY)||'{}'); }catch(_){ return {}; } }
-function saveChecks(){ try{ localStorage.setItem(CHECKS_KEY, JSON.stringify(S.checks)); }catch(_){} }
+const BP_KEY = 'sq_blueprint_v2';
+function defaultBP(){ return {passes:[{id:'study',name:'Study',type:'study'}], activePass:'study', checks:{study:{}}, openMat:{}, openTopic:{}}; }
+function loadBP(){ try{ const v=JSON.parse(localStorage.getItem(BP_KEY)); if(v&&Array.isArray(v.passes)&&v.passes.length&&v.checks) return v; }catch(_){} return defaultBP(); }
+function saveBP(){ try{ localStorage.setItem(BP_KEY, JSON.stringify({passes:S.passes,activePass:S.activePass,checks:S.checks,openMat:S.openMat,openTopic:S.openTopic})); }catch(_){} }
+// Ticks for the currently-selected pass (lazily created).
+function curChecks(){ if(!S.checks[S.activePass]) S.checks[S.activePass]={}; return S.checks[S.activePass]; }
 // All subtopic ids under a material / a topic — used for progress and "tick all".
 function matSubIds(m){ const ids=[]; m.topics.forEach((t,ti)=>t.s.forEach((_,si)=>ids.push(m.id+'.'+ti+'.'+si))); return ids; }
 function topicSubIds(mId,ti,t){ return t.s.map((_,si)=>mId+'.'+ti+'.'+si); }
-S.checks = loadChecks();   // restore ticks now that CHECKS_KEY is defined (avoids the const TDZ)
+// Restore the whole checklist (passes, active pass, ticks, open sections) so a
+// returning user resumes where they were. Runs now that BP_KEY is defined.
+(function(){ const v=loadBP(); S.passes=v.passes; S.activePass=v.activePass; S.checks=v.checks; S.openMat=v.openMat||{}; S.openTopic=v.openTopic||{}; })();
 
 /* ── data ── */
 function subjectsData(){
@@ -351,20 +360,30 @@ window.Q={
     if(stage!==6) await DB.loadSubjectsAndLectures();   // 6th stage uses the blueprint checklist, not the DB
   },
   // ── 6th-stage blueprint checklist ──
-  toggleMatOpen(matId){ S.openMat[matId]=!S.openMat[matId]; setState({openMat:{...S.openMat}}); },
-  toggleTopicOpen(key){ S.openTopic[key]=!S.openTopic[key]; setState({openTopic:{...S.openTopic}}); },
-  toggleSub(id){ const c={...S.checks}; if(c[id]) delete c[id]; else c[id]=1; S.checks=c; saveChecks(); setState({checks:c}); },
-  toggleTopicAll(matId,ti){
-    const m=BLUEPRINT_6TH.find(x=>x.id===matId); if(!m)return;
-    const ids=topicSubIds(matId,ti,m.topics[ti]); const allOn=ids.every(id=>S.checks[id]);
-    const c={...S.checks}; ids.forEach(id=>{ if(allOn) delete c[id]; else c[id]=1; });
-    S.checks=c; saveChecks(); setState({checks:c});
-  },
+  toggleMatOpen(matId){ S.openMat[matId]=!S.openMat[matId]; saveBP(); setState({openMat:{...S.openMat}}); },
+  toggleTopicOpen(key){ S.openTopic[key]=!S.openTopic[key]; saveBP(); setState({openTopic:{...S.openTopic}}); },
+  toggleSub(id){ const c={...curChecks()}; if(c[id]) delete c[id]; else c[id]=1; S.checks={...S.checks,[S.activePass]:c}; saveBP(); setState({checks:S.checks}); },
   toggleMatAll(matId){
     const m=BLUEPRINT_6TH.find(x=>x.id===matId); if(!m)return;
-    const ids=matSubIds(m); const allOn=ids.every(id=>S.checks[id]);
-    const c={...S.checks}; ids.forEach(id=>{ if(allOn) delete c[id]; else c[id]=1; });
-    S.checks=c; saveChecks(); setState({checks:c});
+    const ids=matSubIds(m); const cur=curChecks(); const allOn=ids.every(id=>cur[id]);
+    const c={...cur}; ids.forEach(id=>{ if(allOn) delete c[id]; else c[id]=1; });
+    S.checks={...S.checks,[S.activePass]:c}; saveBP(); setState({checks:S.checks});
+  },
+  // passes (study / revision)
+  setPass(id){ if(!S.passes.some(p=>p.id===id))return; S.activePass=id; saveBP(); setState({activePass:id}); },
+  addRevision(){
+    const n=S.passes.filter(p=>p.type==='revision').length+1;
+    const id='rev'+Date.now().toString(36);
+    S.passes=[...S.passes,{id,name:'Revision '+n,type:'revision'}];
+    S.checks={...S.checks,[id]:{}}; S.activePass=id; saveBP(); setState({});
+  },
+  removePass(id){
+    const p=S.passes.find(x=>x.id===id); if(!p||p.type==='study')return;
+    if(!confirm('Delete "'+p.name+'" and its ticks? This cannot be undone.'))return;
+    S.passes=S.passes.filter(x=>x.id!==id);
+    const c={...S.checks}; delete c[id]; S.checks=c;
+    if(S.activePass===id) S.activePass='study';
+    saveBP(); setState({});
   },
   async onLogout(){
     if(S.role!=='guest') await sb.auth.signOut();
@@ -857,8 +876,9 @@ function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').repl
 function renderChecklist(){
   const dark=S.theme==='dark';
   const themeIcon=dark?'light_mode':'dark_mode';
+  const cur=curChecks();   // ticks for the active pass
   let gTotal=0,gDone=0;
-  BLUEPRINT_6TH.forEach(m=>{const ids=matSubIds(m);gTotal+=ids.length;gDone+=ids.filter(id=>S.checks[id]).length;});
+  BLUEPRINT_6TH.forEach(m=>{const ids=matSubIds(m);gTotal+=ids.length;gDone+=ids.filter(id=>cur[id]).length;});
   const gPct=gTotal?Math.round(gDone/gTotal*100):0;
 
   // Tri-state tick box: full (all done), part (some done), empty.
@@ -869,18 +889,38 @@ function renderChecklist(){
     return `<span style="${base};background:var(--surface);border:1.5px solid var(--border)"></span>`;
   };
 
+  // Study / revision pass switcher banner.
+  const activePass=S.passes.find(p=>p.id===S.activePass)||S.passes[0];
+  const passPills=S.passes.map(p=>{
+    const active=p.id===S.activePass; const icon=p.type==='study'?'school':'replay';
+    return `<span onclick="Q.setPass('${p.id}')" style="display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 ${p.type==='revision'?'7':'13'}px 0 12px;border-radius:9px;cursor:pointer;font-weight:700;font-size:13px;font-family:Figtree;border:1.5px solid ${active?'var(--blue)':'var(--border)'};background:${active?'var(--blue-soft)':'var(--surface)'};color:${active?'var(--blue)':'var(--muted)'}">
+      <span class="ms" style="font-size:17px">${icon}</span>${esc(p.name)}${p.type==='revision'?`<span class="ms" onclick="event.stopPropagation();Q.removePass('${p.id}')" title="Delete pass" style="font-size:16px;color:var(--faint);margin-left:1px">close</span>`:''}
+    </span>`;
+  }).join('');
+  const banner=`<div style="display:flex;align-items:center;gap:13px;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow);padding:14px 16px;margin-bottom:18px">
+      <span class="ms" style="font-size:24px;color:${activePass.type==='study'?'var(--blue)':'var(--yellow-ink)'}">${activePass.type==='study'?'school':'replay'}</span>
+      <div style="min-width:0;flex:1">
+        <div style="font-weight:800;font-size:14px;color:var(--text)">Tracking: ${esc(activePass.name)}</div>
+        <div style="font-weight:500;font-size:12px;color:var(--muted)">${activePass.type==='study'?'Your main study pass through the material.':'A separate revision pass — its ticks are tracked independently.'}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">${passPills}
+        <button onclick="Q.addRevision()" style="display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 13px;border:1.5px dashed var(--border);border-radius:9px;background:transparent;color:var(--muted);font-weight:700;font-size:13px;font-family:Figtree;cursor:pointer"><span class="ms" style="font-size:17px">add</span>Add revision</button>
+      </div>
+    </div>`;
+
   const materials = BLUEPRINT_6TH.map(m=>{
     const t=tile(m.hue);
-    const matIds=matSubIds(m); const mDone=matIds.filter(id=>S.checks[id]).length; const mTot=matIds.length;
+    const matIds=matSubIds(m); const mDone=matIds.filter(id=>cur[id]).length; const mTot=matIds.length;
     const mState=mDone===0?'empty':(mDone===mTot?'full':'part');
     const mPct=mTot?Math.round(mDone/mTot*100):0;
     const open=!!S.openMat[m.id];
     const topicsHTML = open ? m.topics.map((tp,ti)=>{
-      const tIds=topicSubIds(m.id,ti,tp); const tDone=tIds.filter(id=>S.checks[id]).length; const tTot=tIds.length;
+      const tIds=topicSubIds(m.id,ti,tp); const tDone=tIds.filter(id=>cur[id]).length; const tTot=tIds.length;
       const tState=tDone===0?'empty':(tDone===tTot?'full':'part');
+      const tDot=tState==='full'?'var(--green)':(tState==='part'?'var(--blue)':'var(--border)');
       const key=m.id+'.'+ti; const topen=!!S.openTopic[key];
       const subsHTML = topen ? tp.s.map((sub,si)=>{
-        const id=m.id+'.'+ti+'.'+si; const on=!!S.checks[id];
+        const id=m.id+'.'+ti+'.'+si; const on=!!cur[id];
         return `<label onclick="Q.toggleSub('${id}')" style="display:flex;align-items:center;gap:12px;padding:10px 16px 10px 30px;border-top:1px solid var(--border2);cursor:pointer">
           ${box(on?'full':'empty')}
           <span style="font-weight:500;font-size:13.5px;line-height:1.45;color:${on?'var(--faint)':'var(--text)'};text-decoration:${on?'line-through':'none'}">${esc(sub)}</span>
@@ -888,7 +928,7 @@ function renderChecklist(){
       }).join('') : '';
       return `<div style="border-top:1px solid var(--border)">
         <div onclick="Q.toggleTopicOpen('${key}')" style="display:flex;align-items:center;gap:12px;padding:12px 16px 12px 18px;cursor:pointer;background:var(--surface2)">
-          <span onclick="event.stopPropagation();Q.toggleTopicAll('${m.id}',${ti})">${box(tState)}</span>
+          <span style="width:9px;height:9px;flex:none;border-radius:50%;background:${tDot}"></span>
           <span style="font-weight:700;font-size:14px;color:var(--text);flex:1;min-width:0">${esc(tp.t)}</span>
           <span style="font-weight:600;font-size:12px;color:var(--muted)">${tDone}/${tTot}</span>
           <span class="ms" style="font-size:20px;color:var(--faint)">${topen?'expand_less':'expand_more'}</span>
@@ -928,7 +968,8 @@ function renderChecklist(){
     <div style="flex:1;overflow:auto;padding:30px 20px 80px">
       <div style="max-width:880px;margin:0 auto;animation:fadeUp .35s ease both">
         <h1 style="font-weight:800;font-size:26px;letter-spacing:-.7px;color:var(--text);margin:0 0 4px">Exam blueprint checklist</h1>
-        <p style="font-weight:500;font-size:14px;color:var(--muted);margin:0 0 20px">Track your revision across the four 6th-year materials. Open a material to reveal its core topics, then open a topic to tick its subtopics. Progress is saved on this device.</p>
+        <p style="font-weight:500;font-size:14px;color:var(--muted);margin:0 0 20px">Track your progress across the four 6th-year materials. Open a material to reveal its core topics, then open a topic to tick its subtopics. Use separate Study and Revision passes — everything is saved on this device and resumes when you return.</p>
+        ${banner}
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);padding:18px 20px;margin-bottom:20px">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px"><span style="font-weight:700;font-size:14px;color:var(--text)">Overall progress</span><span style="font-weight:800;font-size:15px;color:var(--text)">${gPct}% · ${gDone}/${gTotal}</span></div>
           <div style="height:9px;border-radius:9px;background:var(--surface3);overflow:hidden"><div style="height:100%;width:${gPct}%;background:linear-gradient(90deg,var(--blue),var(--yellow))"></div></div>
